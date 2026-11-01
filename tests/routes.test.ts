@@ -158,3 +158,59 @@ describe("dispatcher endpoint", () => {
     expect((await runPOST(req("/api/jobs/run?limit=0", { method: "POST", headers: auth }))).status).toBe(400);
   });
 });
+
+describe("public agent activity", () => {
+  it("never reveals draft titles, operational errors or media keys", async () => {
+    const { repos, media } = await getServices();
+    const agent = (await repos.agents.getByHandle("droverclock"))!;
+    const cat = (await repos.categories.getBySlug("overclocked"))!;
+    const draftTitle = "SECRET DRAFT: Unreleased Overclock";
+    const draft = await repos.content.insert({ agentId: agent.id, categoryId: cat.id, title: draftTitle, description: "hush", status: "draft", source: "generated", mediaKey: "videos/private-render-key.svg" });
+    await media.put("videos/private-render-key.svg", "<svg/>", "image/svg+xml");
+    const { job } = await repos.jobs.insert({ agentId: agent.id, kind: "video", idempotencyKey: "priv-1", prompt: "p", provider: "pruna", dryRun: false });
+    await repos.activity.log({ type: "job.queued", message: `${agent.name} queued a video job (LIVE)`, agentId: agent.id, jobId: job.id, simulated: false });
+    await repos.activity.log({ type: "content.created", message: `${agent.name} created "${draftTitle}"`, agentId: agent.id, jobId: job.id, contentId: draft.id, simulated: false });
+    await repos.activity.log({ type: "media.stored", message: "Stored videos/private-render-key.svg (2201 bytes)", agentId: agent.id, jobId: job.id, contentId: draft.id, simulated: false });
+    await repos.activity.log({ type: "job.failed", message: "Job failed: Pruna HTTP 402: insufficient credits for key sk-live-123", agentId: agent.id, jobId: job.id, simulated: false, meta: { attempts: 3 } });
+    await repos.activity.log({ type: "content.published", message: `Published "${draftTitle}"`, agentId: agent.id, contentId: draft.id, simulated: false });
+
+    const forbidden = [draftTitle, "private-render-key", "Pruna HTTP 402", "sk-live-123", "failed", "Stored videos"];
+
+    const pub = await repos.activity.publicRecent({ agentId: agent.id, limit: 50 });
+    const pubText = JSON.stringify(pub);
+    for (const f of forbidden) expect(pubText, f).not.toContain(f);
+    expect(pub.map((a) => a.type)).toContain("job.queued");
+    // Seed publications are public; the draft's own publish event is hidden until it is published.
+    expect(pub.filter((a) => a.type === "content.published").length).toBeGreaterThan(0);
+    expect(pub.some((a) => a.contentSlug === draft.slug)).toBe(false);
+    expect(pub.find((a) => a.type === "job.queued")!.message).toBe("Queued a generation job");
+
+    const { default: AgentPage } = await import("@/app/(site)/agents/[handle]/page");
+    // Serialise the rendered element tree, skipping React internals and cycles.
+    const seen = new WeakSet<object>();
+    const pageText = JSON.stringify(await AgentPage({ params: Promise.resolve({ handle: "droverclock" }) }), (key, value) => {
+      if (key.startsWith("_")) return undefined;
+      if (typeof value === "object" && value !== null) {
+        if (seen.has(value)) return undefined;
+        seen.add(value);
+      }
+      return typeof value === "function" || typeof value === "symbol" ? undefined : value;
+    });
+    expect(pageText).toContain("Queued a generation job");
+    for (const f of forbidden) expect(pageText, f).not.toContain(f);
+
+    // The operator view still has everything.
+    const priv = JSON.stringify(await repos.activity.recent({ agentId: agent.id, limit: 50 }));
+    expect(priv).toContain(draftTitle);
+    expect(priv).toContain("Pruna HTTP 402");
+    expect(JSON.stringify(await repos.activity.forJob(job.id)).includes("private-render-key")).toBe(true);
+
+    // Once published, the title becomes public and links to the video.
+    await repos.content.setStatus(draft.id, "published");
+    const later = await repos.activity.publicRecent({ agentId: agent.id, limit: 50 });
+    const published = later.find((a) => a.type === "content.published")!;
+    expect(published.message).toBe(`Published "${draftTitle}"`);
+    expect(published.contentSlug).toBe(draft.slug);
+    expect(JSON.stringify(later)).not.toContain("private-render-key");
+  });
+});

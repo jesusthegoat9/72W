@@ -39,6 +39,8 @@ export interface JobPatch {
   completed_at?: string | null;
 }
 
+const PATCHABLE = new Set<keyof JobPatch>(["status", "provider_ref", "attempts", "last_error", "result", "content_id", "next_attempt_at", "started_at", "completed_at"]);
+
 export function mapJob(row: JobRow): Job {
   const { params, result, dry_run, ...rest } = row;
   return {
@@ -111,6 +113,11 @@ export class JobsRepo {
     }
     if (changes === 0) {
       if (!guarded) throw new Error("job insert affected no rows");
+      // Two identical requests racing for the last slot: the loser's guarded
+      // insert sees the budget as full, but the job it wanted already exists.
+      // Idempotency wins over the budget error, so both callers get that job.
+      const raced = await this.getByIdempotencyKey(input.idempotencyKey);
+      if (raced) return { job: raced, created: false };
       throw new LiveBudgetExceededError(await this.countLiveSince(liveBudget.since), liveBudget.max);
     }
     return { job: (await this.getById(id))!, created: true };
@@ -169,12 +176,42 @@ export class JobsRepo {
     const params: SqlValue[] = [nowIso()];
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined) continue;
+      if (!PATCHABLE.has(k as keyof JobPatch)) throw new Error(`job patch: column '${k}' is not updatable`);
       sets.push(`${k} = ?`);
       params.push(k === "result" ? (v === null ? null : JSON.stringify(v)) : (v as SqlValue));
     }
     params.push(id);
     await this.db.prepare(`UPDATE generation_jobs SET ${sets.join(", ")} WHERE id = ?`).bind(...params).run();
     return (await this.getById(id))!;
+  }
+
+  /**
+   * Recovers jobs stuck in `processing` because a worker died mid-run
+   * (no provider_ref, so there is nothing remote to poll). Jobs with attempts
+   * left go back to the queue; the rest fail. Video jobs that already hold a
+   * provider_ref are left alone: the dispatcher polls those every run.
+   */
+  async recoverStale(olderThanIso: string, now: string): Promise<{ requeued: number; failed: number }> {
+    const message = `requeued: processing since before ${olderThanIso} with no provider reference`;
+    const requeued = (
+      await this.db
+        .prepare(
+          `UPDATE generation_jobs SET status = 'queued', next_attempt_at = NULL, last_error = ?, updated_at = ?
+           WHERE status = 'processing' AND provider_ref IS NULL AND started_at < ? AND attempts < max_attempts`,
+        )
+        .bind(message, now, olderThanIso)
+        .run()
+    ).changes;
+    const failed = (
+      await this.db
+        .prepare(
+          `UPDATE generation_jobs SET status = 'failed', completed_at = ?, last_error = ?, updated_at = ?
+           WHERE status = 'processing' AND provider_ref IS NULL AND started_at < ? AND attempts >= max_attempts`,
+        )
+        .bind(now, "failed: stale processing with no attempts left", now, olderThanIso)
+        .run()
+    ).changes;
+    return { requeued, failed };
   }
 
   /** Number of non-dry-run jobs created since `sinceIso`. Used for the daily live budget. */

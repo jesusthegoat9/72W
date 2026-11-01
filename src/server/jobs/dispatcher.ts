@@ -20,6 +20,8 @@ export interface DispatcherDeps {
 }
 
 export interface DispatchSummary {
+  /** Orphaned `processing` jobs put back in the queue (or failed) before this pass. */
+  recovered: number;
   claimed: number;
   completed: number;
   retried: number;
@@ -42,7 +44,13 @@ export async function runDispatcher(deps: DispatcherDeps, opts: { limit?: number
   const log = deps.log ?? (() => {});
   const mocks = deps.mocks ?? defaultMocks();
   const limit = Math.max(1, Math.min(opts.limit ?? config.maxJobsPerRun, config.maxJobsPerRun));
-  const summary: DispatchSummary = { claimed: 0, completed: 0, retried: 0, failed: 0, pending: 0, skipped: 0, jobIds: [] };
+  const summary: DispatchSummary = { recovered: 0, claimed: 0, completed: 0, retried: 0, failed: 0, pending: 0, skipped: 0, jobIds: [] };
+
+  // 0. Orphans: a worker that died mid-job leaves it `processing` forever.
+  const cutoff = new Date(now().getTime() - config.staleAfterSeconds * 1000).toISOString();
+  const stale = await repos.jobs.recoverStale(cutoff, now().toISOString());
+  summary.recovered = stale.requeued + stale.failed;
+  if (summary.recovered) log(`recovered ${stale.requeued} stale job(s), failed ${stale.failed}`);
 
   // 1. In-flight video jobs waiting on a remote render.
   const polling = (await repos.jobs.list({ status: "processing", limit })).filter((j) => j.kind === "video" && j.provider_ref);

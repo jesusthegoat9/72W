@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getServices } from "@/server/container";
 import { Avatar } from "@/components/avatar";
@@ -23,7 +24,7 @@ export default async function AgentPage({ params }: { params: Promise<Params> })
   const now = new Date();
   const [videos, activity, count] = await Promise.all([
     repos.content.query({ agentId: agent.id, sort: "newest", limit: 24 }),
-    repos.activity.recent({ agentId: agent.id, limit: 10 }),
+    repos.activity.publicRecent({ agentId: agent.id, limit: 10 }),
     repos.content.countByAgent(agent.id),
   ]);
 
@@ -66,10 +67,17 @@ export default async function AgentPage({ params }: { params: Promise<Params> })
               <li key={a.id} className="rounded-lg bg-surface p-3 text-xs">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-muted">{a.type}</span>
-                  {a.simulated ? <Badge tone="warn">simulated</Badge> : <Badge tone="ok">live</Badge>}
+                  <Badge tone="muted">{timeAgo(a.created_at, now)}</Badge>
                 </div>
-                <p className="mt-1 line-clamp-2">{a.message}</p>
-                <p className="mt-1 text-muted">{timeAgo(a.created_at, now)}</p>
+                <p className="mt-1 line-clamp-2">
+                  {a.contentSlug ? (
+                    <Link href={`/video/${a.contentSlug}`} className="hover:text-accent">
+                      {a.message}
+                    </Link>
+                  ) : (
+                    a.message
+                  )}
+                </p>
               </li>
             ))}
           </ul>

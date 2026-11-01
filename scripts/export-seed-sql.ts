@@ -6,7 +6,7 @@
  */
 import { writeFile } from "node:fs/promises";
 import { getServices } from "../src/server/container";
-import { SqliteDatabase } from "../src/server/db/sqlite";
+import type { SqliteDatabase } from "../src/server/db/sqlite";
 
 const TABLES: Record<string, string> = {
   categories: "SELECT * FROM categories",

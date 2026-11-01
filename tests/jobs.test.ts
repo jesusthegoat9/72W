@@ -80,6 +80,26 @@ describe("JobService.enqueue", () => {
     expect((await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "dry" })).created).toBe(true);
   });
 
+  it("two identical live requests racing for the last slot both get the same job", async () => {
+    const { repos } = await freshRepos();
+    const svc = new JobService(repos, testConfig({ liveGenerationEnabled: true, maxLiveJobsPerDay: 1 }));
+    const same = { agentHandle: "rackdaddy", kind: "text" as const, live: true, idempotencyKey: "last-slot" };
+    // Both pass the "does it exist yet" check before either inserts; the
+    // loser's guarded insert then sees a full budget. It must still return
+    // the winner's job instead of a budget error.
+    const [a, b] = await Promise.all([svc.enqueue(same), svc.enqueue(same)]);
+    expect(a.job.id).toBe(b.job.id);
+    expect([a.created, b.created].sort()).toEqual([false, true]);
+    expect((await repos.jobs.list()).length).toBe(1);
+    // A distinct job is still refused: the budget stays atomic.
+    await expect(svc.enqueue({ ...same, idempotencyKey: "another" })).rejects.toThrow(/daily live job limit/);
+    // And the repo-level path behaves the same with an explicit budget.
+    const budget = { since: "2000-01-01T00:00:00.000Z", max: 1 };
+    const agent = (await repos.agents.getByHandle("rackdaddy"))!;
+    const dup = await repos.jobs.insert({ agentId: agent.id, kind: "text", idempotencyKey: "last-slot", prompt: "p", provider: "openrouter", dryRun: false }, budget);
+    expect(dup).toMatchObject({ created: false, job: { id: a.job.id } });
+  });
+
   it("repo-level budget guard is enforced in the insert statement itself", async () => {
     const { repos } = await freshRepos();
     const agent = (await repos.agents.getByHandle("rackdaddy"))!;
@@ -239,6 +259,36 @@ describe("dispatcher", () => {
     // Dry-run parents never touch the budget.
     const { job: dryParent } = await repos.jobs.insert({ agentId: agent.id, kind: "text", idempotencyKey: "dry-parent", prompt: "p", provider: "mock", dryRun: true });
     expect(await chainVideoJob({ repos, config }, dryParent, input)).toMatchObject({ skipped: false, created: true });
+  });
+
+  it("recovers jobs orphaned in processing and leaves remote renders alone", async () => {
+    const { repos } = await freshRepos();
+    const svc = new JobService(repos, testConfig());
+    const { job: orphan } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "orphan" });
+    const { job: spent } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "spent", maxAttempts: 1 });
+    const { job: remote } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "video", idempotencyKey: "remote" });
+    const { job: fresh } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "fresh" });
+    const longAgo = "2026-01-01T00:00:00.000Z";
+    for (const j of [orphan, spent, remote]) expect(await repos.jobs.claim(j.id, longAgo)).toBe(true);
+    await repos.jobs.update(remote.id, { provider_ref: "mock_remote" });
+    expect(await repos.jobs.claim(fresh.id, new Date().toISOString())).toBe(true);
+
+    const d = deps(repos, { staleAfterSeconds: 60 }, { text: new MockTextProvider(), video: new MockVideoProvider() });
+    const r = await runDispatcher(d);
+    expect(r.recovered).toBe(2);
+    expect((await repos.jobs.getById(orphan.id))!.status).toBe("completed"); // requeued, then run in the same pass
+    expect((await repos.jobs.getById(orphan.id))!.attempts).toBe(2);
+    expect((await repos.jobs.getById(spent.id))!).toMatchObject({ status: "failed", last_error: expect.stringMatching(/stale/) });
+    expect((await repos.jobs.getById(fresh.id))!.status).toBe("processing"); // recent: not touched
+    const remoteAfter = (await repos.jobs.getById(remote.id))!;
+    expect(remoteAfter.provider_ref).toBe("mock_remote"); // still polled, never requeued
+  });
+
+  it("rejects patches to columns that are not updatable", async () => {
+    const { repos } = await freshRepos();
+    const svc = new JobService(repos, testConfig());
+    const { job } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text" });
+    await expect(repos.jobs.update(job.id, { idempotency_key: "x" } as never)).rejects.toThrow(/not updatable/);
   });
 
   it("does not run a job before its next_attempt_at", async () => {

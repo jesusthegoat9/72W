@@ -10,7 +10,6 @@
     "DATA_BACKEND": "cloudflare",
     "GENERATION_LIVE": "false",
     "GENERATION_DRY_RUN": "true"
-    // MEDIA_PUBLIC_URL: set to the R2 bucket's custom domain once one exists.
   },
   "d1_databases": [
     {
@@ -21,6 +20,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Keep this bucket private (no r2.dev URL, no custom domain): it stores
+  // draft renders next to published ones. Media is served via /api/media.
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "x86xx-media" }]
   // Not configured yet (see README "Connecting Cloudflare"):
   // - NEXT_INC_CACHE_R2_BUCKET for the Next incremental cache (only needed for ISR / "use cache")

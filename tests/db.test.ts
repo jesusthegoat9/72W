@@ -7,11 +7,35 @@ describe("migrations", () => {
   it("apply once and are recorded", async () => {
     const db = new SqliteDatabase(":memory:");
     const first = await migrate(db);
-    expect(first).toEqual(["0001_init.sql"]);
+    expect(first).toEqual(["0001_init.sql", "0002_indexes.sql"]);
     const second = await migrate(db);
     expect(second).toEqual([]);
     const tables = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all<{ name: string }>();
     expect(tables.map((t) => t.name)).toEqual(expect.arrayContaining(["agents", "categories", "content", "generation_jobs", "activity_log"]));
+  });
+});
+
+describe("migrations", () => {
+  it("roll back a failing migration file and apply the later index migration to an older database", async () => {
+    const { mkdtemp, writeFile, copyFile } = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = await mkdtemp(path.join(os.tmpdir(), "x86xx-mig-"));
+    await copyFile(path.join(process.cwd(), "migrations/0001_init.sql"), path.join(dir, "0001_init.sql"));
+    await writeFile(path.join(dir, "0002_bad.sql"), "CREATE TABLE extra (id TEXT PRIMARY KEY);\nINSERT INTO nope VALUES (1);");
+    const db = new SqliteDatabase(":memory:");
+    await expect(migrate(db, dir)).rejects.toThrow(/0002_bad.sql failed and was rolled back/);
+    const tables = (await db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all<{ name: string }>()).map((t) => t.name);
+    expect(tables).toContain("agents");
+    expect(tables).not.toContain("extra");
+    expect((await db.prepare("SELECT name FROM _migrations").all<{ name: string }>()).map((r) => r.name)).toEqual(["0001_init.sql"]);
+
+    // A database created before 0002 existed picks it up on the next run.
+    const indexes = (await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all<{ name: string }>()).map((i) => i.name);
+    expect(indexes).not.toContain("idx_content_media_key");
+    expect(await migrate(db)).toEqual(["0002_indexes.sql"]);
+    const after = (await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all<{ name: string }>()).map((i) => i.name);
+    expect(after).toEqual(expect.arrayContaining(["idx_content_media_key", "idx_activity_job", "idx_activity_content", "idx_jobs_processing"]));
   });
 });
 
@@ -84,6 +108,16 @@ describe("seed + repositories", () => {
     const b = await repos.content.insert({ agentId: agent.id, categoryId: cat.id, title: "Same Title", description: "y" });
     expect(a.slug).toBe("same-title");
     expect(b.slug).toBe("same-title-2");
+  });
+
+  it("allocates unique slugs under concurrent inserts of the same title", async () => {
+    const { repos } = await freshRepos();
+    const agent = (await repos.agents.getByHandle("rackdaddy"))!;
+    const cat = (await repos.categories.getBySlug("hot-racks"))!;
+    const rows = await Promise.all(Array.from({ length: 6 }, (_, i) => repos.content.insert({ agentId: agent.id, categoryId: cat.id, title: "Racy Rack", description: String(i) })));
+    const slugs = rows.map((r) => r.slug);
+    expect(new Set(slugs).size).toBe(6);
+    expect(slugs).toContain("racy-rack");
   });
 
   it("enforces foreign keys", async () => {

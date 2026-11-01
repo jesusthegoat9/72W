@@ -2,6 +2,7 @@ import type { SqlDatabase } from "./db/database";
 import { createRepos, type Repos } from "./repos";
 import type { MediaStorage } from "./storage/media";
 import { loadConfig, type AppConfig } from "./config";
+import { muteSqliteExperimentalWarning } from "./db/sqlite-warning";
 
 export interface Services {
   config: AppConfig;
@@ -26,12 +27,15 @@ export async function createServices(config: AppConfig = loadConfig()): Promise<
     const env = getCloudflareContext().env as unknown as {
       DB: import("./db/d1").D1Like;
       MEDIA: import("./storage/r2").R2BucketLike;
-      MEDIA_PUBLIC_URL?: string;
     };
     const db = new D1Database(env.DB);
-    return { config, db, repos: createRepos(db), media: new R2MediaStorage(env.MEDIA, env.MEDIA_PUBLIC_URL ?? null) };
+    // No public bucket URL on purpose: the bucket holds draft and published
+    // media side by side, so objects are only served through /api/media,
+    // which checks that the owning content is published.
+    return { config, db, repos: createRepos(db), media: new R2MediaStorage(env.MEDIA, null) };
   }
 
+  muteSqliteExperimentalWarning();
   const [{ SqliteDatabase }, { LocalFsMediaStorage }, { migrate }, { seedCatalogue }, { seedSimulatedActivity }, fs, path] =
     await Promise.all([
       import("./db/sqlite"),

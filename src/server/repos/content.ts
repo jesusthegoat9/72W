@@ -64,35 +64,45 @@ export class ContentRepo {
     const id = newId("vid");
     const ts = input.createdAt ?? nowIso();
     const status = input.status ?? "draft";
-    const slug = await this.uniqueSlug(slugify(input.title) || id);
-    await this.db
-      .prepare(
-        `INSERT INTO content (id, agent_id, category_id, job_id, title, slug, description, tags, duration_seconds,
-           media_key, thumbnail_seed, status, source, views, likes, published_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        id,
-        input.agentId,
-        input.categoryId,
-        input.jobId ?? null,
-        input.title,
-        slug,
-        input.description,
-        JSON.stringify(input.tags ?? []),
-        input.durationSeconds ?? 0,
-        input.mediaKey ?? null,
-        input.thumbnailSeed ?? id,
-        status,
-        input.source ?? "seed",
-        input.views ?? 0,
-        input.likes ?? 0,
-        input.publishedAt ?? (status === "published" ? ts : null),
-        ts,
-        ts,
-      )
-      .run();
-    return (await this.getById(id))!;
+    const base = slugify(input.title) || id;
+    // Concurrent inserts can pick the same free slug; the UNIQUE index catches
+    // the losers, which retry with the next free suffix (one winner per round).
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const slug = await this.uniqueSlug(base);
+      try {
+        await this.db
+          .prepare(
+            `INSERT INTO content (id, agent_id, category_id, job_id, title, slug, description, tags, duration_seconds,
+               media_key, thumbnail_seed, status, source, views, likes, published_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            id,
+            input.agentId,
+            input.categoryId,
+            input.jobId ?? null,
+            input.title,
+            slug,
+            input.description,
+            JSON.stringify(input.tags ?? []),
+            input.durationSeconds ?? 0,
+            input.mediaKey ?? null,
+            input.thumbnailSeed ?? id,
+            status,
+            input.source ?? "seed",
+            input.views ?? 0,
+            input.likes ?? 0,
+            input.publishedAt ?? (status === "published" ? ts : null),
+            ts,
+            ts,
+          )
+          .run();
+        return (await this.getById(id))!;
+      } catch (err) {
+        if (!/UNIQUE.*slug|content\.slug/i.test(String(err))) throw err;
+      }
+    }
+    throw new Error(`could not allocate a unique slug for "${input.title}"`);
   }
 
   private async uniqueSlug(base: string): Promise<string> {

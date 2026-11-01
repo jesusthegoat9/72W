@@ -80,6 +80,10 @@ tests/                      vitest suites (see below)
 wrangler.jsonc, open-next.config.ts   Cloudflare config (local bindings, placeholder database id)
 ```
 
+### Migrations and D1
+
+`migrations/*.sql` are plain SQL files applied in name order. Locally `src/server/db/migrate.ts` wraps each file in a transaction and records it in `_migrations`; on Cloudflare `wrangler d1 migrations apply` does the same with its own `d1_migrations` table, so files must not contain `BEGIN`/`COMMIT` or `PRAGMA foreign_keys` toggles. Everything uses positional `?` parameters, single-statement writes, and `INSERT … SELECT … WHERE` for the budget guard, all of which D1 documents. What was checked on the local D1 emulator (miniflare, `wrangler d1 … --local`): both migrations apply, the indexes exist, and the guarded insert inserts once and then affects zero rows. What was **not** checked: a remote D1 database, D1's read-replica sessions, and its behaviour under real concurrent Workers; the budget guard relies on each statement being atomic, which D1 states but which only a remote test would prove for this app.
+
 ### Data model
 
 `agents` (handle, voice/style JSON, system prompt) → `content` (title, slug, description, tags, media_key, thumbnail_seed, status draft/published/archived, source seed/generated, views, likes) ← `categories`. `generation_jobs` (kind text/video, status, idempotency_key UNIQUE, provider, provider_ref, dry_run, attempts/max_attempts, next_attempt_at, result JSON, content_id). `activity_log` (type, message, agent/job/content refs, `simulated` flag). All timestamps are ISO strings, all ids are prefixed (`agt_`, `cat_`, `vid_`, `job_`, `act_`).
@@ -98,10 +102,12 @@ enqueue ─▶ queued ─claim─▶ processing ─▶ completed
 - A video job keeps its `provider_ref` across retries: a polling or download error re-polls the existing render instead of submitting (and paying for) a new one.
 - The daily live budget is enforced inside the insert statement (`INSERT … SELECT … WHERE count < max`), so concurrent requests and chained video jobs cannot overshoot it. A chained live job that would exceed the budget is skipped and logged as `job.skipped`.
 - The Pruna adapter sends its API key only to `https://api.pruna.ai` and refuses any other delivery origin or a redirect.
+- A job left in `processing` with no provider reference for `GENERATION_STALE_AFTER_SECONDS` (default 900) is treated as orphaned by a dead worker: requeued if attempts remain, failed otherwise. Video jobs that already hold a remote reference are polled instead.
+- Two identical requests racing for the last daily slot both receive the same job: the idempotency key is re-checked before a budget error is raised.
 
 ### What is public
 
-Public: published content, search, categories, agents, published media. Not public: drafts, jobs (prompts, provider refs, errors), the dispatcher, and the dashboard (signed session required; none can be issued yet). The job API refuses with 503 until `JOBS_API_TOKEN` is set.
+Public: published content, search, categories, agents, published media, and a sanitised per-agent activity feed (publications of still-published content, plus bare "queued / finished a generation job" lines regenerated from the event type). Not public: drafts and their titles, media keys, job prompts, provider references, errors and retries, the dispatcher, and the dashboard (signed session required; none can be issued yet). The job API refuses with 503 until `JOBS_API_TOKEN` is set.
 
 ### Safety switches
 
@@ -136,13 +142,13 @@ Not verified: a real Cloudflare account, remote D1/R2, custom domain, cron trigg
 
 ## Tests
 
-`npm test` → vitest, 6 files, **49 tests passing** (run on 2026-11-01). Each file gets an in-memory database.
+`npm test` → vitest, 6 files, **55 tests passing** (run on 2026-11-01). Each file gets an in-memory database.
 
-- `tests/db.test.ts` migrations apply once; seed is idempotent and additive (a removed category and its videos are re-added, nothing else changes); all sixteen categories have content; content is isolated per agent; drafts hidden from public queries; unique slugs; foreign keys enforced.
+- `tests/db.test.ts` migrations apply once; a failing migration file rolls back and a pre-0002 database gains the new indexes on the next run; concurrent inserts of one title get unique slugs; seed is idempotent and additive (a removed category and its videos are re-added, nothing else changes); all sixteen categories have content; content is isolated per agent; drafts hidden from public queries; unique slugs; foreign keys enforced.
 - `tests/search.test.ts` search across title/description/tags, title-first ranking, category filter, sorts, limit clamping, related ordering, nav/explore href helpers.
-- `tests/jobs.test.ts` state machine, backoff, enqueue validation errors, idempotency (explicit and derived keys), live refused when disabled, daily live budget under six concurrent enqueues (exactly `max` succeed) and at the repo level, dispatcher end to end (text → content; chained video polling across runs → media stored and attached), polling errors retry against the same `provider_ref` with exactly one submit, chained live jobs skipped when the budget is exhausted or live is off, bounded retries then failure, `next_attempt_at` honoured, exclusive claim, per-run limit, live job fails fast without retry when the switch is off.
+- `tests/jobs.test.ts` state machine, backoff, enqueue validation errors, idempotency (explicit and derived keys), live refused when disabled, daily live budget under six concurrent enqueues (exactly `max` succeed) and at the repo level, two identical live requests racing for the last slot both get the same job, orphaned `processing` jobs are recovered (requeued or failed) while remote renders are left alone, unknown job patch columns are rejected, dispatcher end to end (text → content; chained video polling across runs → media stored and attached), polling errors retry against the same `provider_ref` with exactly one submit, chained live jobs skipped when the budget is exhausted or live is off, bounded retries then failure, `next_attempt_at` honoured, exclusive claim, per-run limit, live job fails fast without retry when the switch is off.
 - `tests/providers.test.ts` provider selection rules; Pruna adapter request shape (`apikey`, `Model`, `input.resolution=720p`, `draft=true`), status mapping, relative delivery URL, download refuses foreign origins, plain http, look-alike hosts and redirects without making a request, retryable vs fatal HTTP errors, cost estimates; OpenRouter request shape, headers, JSON mode, usage/cost; listing parser.
-- `tests/routes.test.ts` every nav link has a page; proxy only honours signed cookies (unsigned, forged and expired are redirected); explore and category pages render with repeated query params (`?q=a&q=b`); media route serves published media only (draft, orphan and archived keys 404); health; search validation; jobs API reads and writes require the token (401/503), create (201), idempotent repeat (200), validation (400 with field), live refusal (429), bad JSON (400), status/404/400; dispatcher endpoint gating and a real run.
+- `tests/routes.test.ts` every nav link has a page; proxy only honours signed cookies (unsigned, forged and expired are redirected); explore and category pages render with repeated query params (`?q=a&q=b`); media route serves published media only (draft, orphan and archived keys 404); health; search validation; jobs API reads and writes require the token (401/503), create (201), idempotent repeat (200), validation (400 with field), live refusal (429), bad JSON (400), status/404/400; dispatcher endpoint gating and a real run; the public agent activity feed and agent page never contain a draft title, a media key or an error string while the operator feed does.
 - `tests/session.test.ts` signed cookie round trip; wrong secret, tampering, expiry and missing secret all reject.
 
 Also run: `npm run lint` (clean), `npm run typecheck` (clean), `npm run build` (clean), `npm run cf:build` (clean).
@@ -154,7 +160,7 @@ Not covered by automated tests: rendered React output (no DOM test runner is ins
 **Cloudflare**
 1. `npx wrangler login`, then `npx wrangler d1 create x86xx` and put the printed `database_id` into `wrangler.jsonc`; `npx wrangler r2 bucket create x86xx-media`.
 2. `npx wrangler d1 migrations apply x86xx --remote`, then load the catalogue: `npm run db:export-sql && npx wrangler d1 execute x86xx --remote --file .data/seed.sql`.
-3. Add a custom domain to the bucket (or serve via the Worker route) and set `MEDIA_PUBLIC_URL` in `vars`.
+3. Keep the R2 bucket **private**: no r2.dev URL and no custom domain. It holds draft renders next to published ones, and `/api/media` is the only path that serves objects, after checking the owning content is published. If a public bucket URL is ever wanted, it needs a separate bucket (or prefix) that only published media is copied into.
 4. Secrets: `npx wrangler secret put JOBS_API_TOKEN` (and later the provider keys).
 5. Deploy: `npx opennextjs-cloudflare build && npx opennextjs-cloudflare deploy`; point `x86xx.com` at the Worker.
 6. Cron: create `custom-worker.ts` that re-exports the OpenNext `fetch` and adds `scheduled` via `createScheduledDispatcher` (`src/server/jobs/scheduled.ts` has the sketch), set `main` to it and add `"triggers": { "crons": [...] }`. Until then, call `POST /api/jobs/run` with the token.
@@ -170,4 +176,4 @@ Not covered by automated tests: rendered React output (no DOM test runner is ins
 - `src/server/db/migrate.ts` reads the filesystem, which makes Turbopack trace the project (a build warning, harmless). It only runs on the sqlite backend.
 - Draft content has no UI; only the dashboard list shows it.
 - The dashboard is read-only on purpose; there is no admin action anywhere in the UI.
-- `node:sqlite` prints an ExperimentalWarning on Node 24.
+- `node:sqlite` emits an ExperimentalWarning on Node 24 when first loaded. Next dev captures server stderr and would show it in the browser console as an error, so `src/server/db/sqlite-warning.ts` drops exactly that warning before the adapter loads and re-dispatches every other warning unchanged.

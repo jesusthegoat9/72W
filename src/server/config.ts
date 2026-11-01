@@ -17,6 +17,8 @@ export interface AppConfig {
   maxLiveJobsPerDay: number;
   maxAttempts: number;
   retryBackoffSeconds: number;
+  /** A job left in `processing` this long with no provider reference is assumed orphaned and requeued. */
+  staleAfterSeconds: number;
   /** Token required for the write endpoints under /api/jobs. Unset = endpoints disabled. */
   jobsApiToken: string | null;
   openrouter: {
@@ -59,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxLiveJobsPerDay: num(env.GENERATION_MAX_LIVE_PER_DAY, 10),
     maxAttempts: num(env.GENERATION_MAX_ATTEMPTS, 3),
     retryBackoffSeconds: num(env.GENERATION_RETRY_BACKOFF_SECONDS, 60),
+    staleAfterSeconds: num(env.GENERATION_STALE_AFTER_SECONDS, 900),
     jobsApiToken: env.JOBS_API_TOKEN || null,
     openrouter: {
       apiKey: env.OPENROUTER_API_KEY || null,
