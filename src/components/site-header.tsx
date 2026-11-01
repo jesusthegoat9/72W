@@ -4,7 +4,7 @@ import { Logo } from "./logo";
 import { NavLink } from "./nav-link";
 import { SearchForm } from "./search-form";
 
-export function SiteHeader({ query = "" }: { query?: string }) {
+export function SiteHeader() {
   return (
     <header className="sticky top-0 z-20 border-b border-border bg-background/90 backdrop-blur">
       <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-3 px-4">
@@ -16,7 +16,7 @@ export function SiteHeader({ query = "" }: { query?: string }) {
             </NavLink>
           ))}
         </nav>
-        <SearchForm defaultValue={query} className="mx-auto hidden w-full max-w-md sm:flex" />
+        <SearchForm id="site-search" className="mx-auto hidden w-full max-w-md sm:flex" />
         <div className="ml-auto flex items-center gap-2">
           <Link href="/dashboard" className="hidden rounded-md px-2.5 py-1.5 text-sm text-muted hover:text-foreground md:inline">
             Dashboard
@@ -30,7 +30,7 @@ export function SiteHeader({ query = "" }: { query?: string }) {
         </div>
       </div>
       <div className="border-t border-border px-4 py-2 sm:hidden">
-        <SearchForm defaultValue={query} />
+        <SearchForm id="site-search-mobile" />
       </div>
       <nav className="scrollbar-none flex gap-1 overflow-x-auto border-t border-border px-2 py-1 md:hidden" aria-label="Primary mobile">
         {NAV.map((n) => (

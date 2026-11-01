@@ -1,17 +1,22 @@
 import type { NextRequest } from "next/server";
 import { getServices } from "@/server/container";
 import { JobService } from "@/server/jobs/service";
-import { error, errorResponse, json, tokenMatches } from "@/server/http";
+import { error, errorResponse, json, requireJobsToken } from "@/server/http";
 import type { JobStatus } from "@/server/db/types";
 
 const STATUSES: JobStatus[] = ["queued", "processing", "completed", "failed"];
 
-/** GET /api/jobs?status=&limit=  (read-only) */
+/**
+ * GET /api/jobs?status=&limit=  (requires the bearer token)
+ * Jobs carry prompts, provider references and errors: operator data, not public.
+ */
 export async function GET(req: NextRequest) {
+  const { repos, config } = await getServices();
+  const denied = requireJobsToken(req, config.jobsApiToken);
+  if (denied) return denied;
   const sp = req.nextUrl.searchParams;
   const status = sp.get("status") ?? undefined;
   if (status && !STATUSES.includes(status as JobStatus)) return error(400, `status must be one of ${STATUSES.join(", ")}`, { field: "status" });
-  const { repos } = await getServices();
   const jobs = await repos.jobs.list({ status: status as JobStatus | undefined, limit: Number(sp.get("limit") ?? 50) || 50 });
   return json({ count: jobs.length, jobs });
 }
@@ -23,10 +28,8 @@ export async function GET(req: NextRequest) {
  */
 export async function POST(req: NextRequest) {
   const { repos, config } = await getServices();
-  if (!config.jobsApiToken) return error(503, "job submission is disabled: JOBS_API_TOKEN is not configured");
-  const auth = req.headers.get("authorization");
-  const provided = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!tokenMatches(provided, config.jobsApiToken)) return error(401, "invalid or missing bearer token");
+  const denied = requireJobsToken(req, config.jobsApiToken, "job submissions");
+  if (denied) return denied;
 
   try {
     const body = (await req.json()) as Record<string, unknown>;

@@ -8,6 +8,10 @@ import { GET as searchGET } from "@/app/api/search/route";
 import { GET as jobsGET, POST as jobsPOST } from "@/app/api/jobs/route";
 import { GET as jobGET } from "@/app/api/jobs/[id]/route";
 import { GET as healthGET } from "@/app/api/health/route";
+import { GET as mediaGET } from "@/app/api/media/[...key]/route";
+import { signSession } from "@/lib/session";
+import { parseExploreParams } from "@/lib/search-params";
+import { getServices } from "@/server/container";
 
 type Init = { method?: string; body?: string; headers?: Record<string, string>; cookie?: string };
 const req = (url: string, init: Init = {}) => {
@@ -26,15 +30,35 @@ describe("navigation", () => {
     expect(existsSync(path.join(process.cwd(), "src/app/(app)/dashboard/page.tsx"))).toBe(true);
   });
 
-  it("proxy guards the dashboard and bounces signed-in users off auth pages", () => {
-    const toLogin = proxy(req("/dashboard"));
+  it("proxy guards the dashboard and only honours signed session cookies", async () => {
+    const toLogin = await proxy(req("/dashboard"));
     expect(toLogin.status).toBe(307);
     expect(new URL(toLogin.headers.get("location")!).pathname).toBe("/login");
     expect(new URL(toLogin.headers.get("location")!).searchParams.get("next")).toBe("/dashboard");
 
-    expect(proxy(req("/dashboard", { cookie: "abc" })).headers.get("location")).toBeNull();
-    expect(new URL(proxy(req("/login", { cookie: "abc" })).headers.get("location")!).pathname).toBe("/dashboard");
-    expect(proxy(req("/explore?q=rack")).headers.get("location")).toBeNull();
+    // Any old string used to pass. Now it must be signed with SESSION_SECRET.
+    expect(new URL((await proxy(req("/dashboard", { cookie: "abc" }))).headers.get("location")!).pathname).toBe("/login");
+    const forged = await signSession("user_1", "not-the-secret");
+    expect(new URL((await proxy(req("/dashboard", { cookie: forged }))).headers.get("location")!).pathname).toBe("/login");
+
+    const valid = await signSession("user_1", process.env.SESSION_SECRET!);
+    expect((await proxy(req("/dashboard", { cookie: valid }))).headers.get("location")).toBeNull();
+    expect(new URL((await proxy(req("/login", { cookie: valid }))).headers.get("location")!).pathname).toBe("/dashboard");
+    expect((await proxy(req("/explore?q=rack"))).headers.get("location")).toBeNull();
+  });
+
+  it("explore page tolerates repeated and odd query params", async () => {
+    expect(parseExploreParams({ q: ["rack", "other"], sort: ["views"], category: ["hot-racks", "x"] })).toEqual({ q: "rack", category: "hot-racks", sort: "views" });
+    expect(parseExploreParams({ q: "  a".padEnd(200, "b") })).toMatchObject({ q: expect.stringMatching(/^a?b+$/) });
+    expect(parseExploreParams({ category: "Hot Racks", sort: "nope" })).toEqual({ q: "", category: undefined, sort: "trending" });
+    expect(parseExploreParams({})).toEqual({ q: "", category: undefined, sort: "trending" });
+
+    const { default: ExplorePage } = await import("@/app/(site)/explore/page");
+    // `?q=rack&q=rack` arrives as an array; this used to throw on `.trim()`.
+    const el = await ExplorePage({ searchParams: Promise.resolve({ q: ["rack", "rack"], sort: ["newest", "views"] }) });
+    expect(el).toBeTruthy();
+    const { default: CategoryPage } = await import("@/app/(site)/category/[slug]/page");
+    expect(await CategoryPage({ params: Promise.resolve({ slug: "hot-racks" }), searchParams: Promise.resolve({ sort: ["views", "newest"] }) })).toBeTruthy();
   });
 });
 
@@ -57,7 +81,29 @@ describe("API routes", () => {
     expect(body.results[0]).toHaveProperty("agent_handle");
   });
 
-  it("jobs write endpoint requires the configured bearer token", async () => {
+  it("media is served only for published content", async () => {
+    const { repos, media } = await getServices();
+    const agent = (await repos.agents.getByHandle("rackdaddy"))!;
+    const cat = (await repos.categories.getBySlug("hot-racks"))!;
+    await media.put("videos/draft-only.svg", "<svg/>", "image/svg+xml");
+    await media.put("videos/public.svg", "<svg/>", "image/svg+xml");
+    await media.put("videos/orphan.svg", "<svg/>", "image/svg+xml");
+    const draft = await repos.content.insert({ agentId: agent.id, categoryId: cat.id, title: "Draft With Media", description: "x", status: "draft", mediaKey: "videos/draft-only.svg" });
+    const pub = await repos.content.insert({ agentId: agent.id, categoryId: cat.id, title: "Public With Media", description: "x", status: "published", mediaKey: "videos/public.svg" });
+    const get = (k: string) => mediaGET(req(`/api/media/${k}`), { params: Promise.resolve({ key: k.split("/") }) });
+    expect((await get("videos/draft-only.svg")).status).toBe(404);
+    expect((await get("videos/orphan.svg")).status).toBe(404);
+    expect((await get("videos/public.svg")).status).toBe(200);
+    expect((await get("../etc/passwd")).status).toBe(400);
+    await repos.content.setStatus(draft.id, "published");
+    expect((await get("videos/draft-only.svg")).status).toBe(200);
+    await repos.content.setStatus(pub.id, "archived");
+    expect((await get("videos/public.svg")).status).toBe(404);
+  });
+
+  it("job reads and writes require the configured bearer token", async () => {
+    expect((await jobsGET(req("/api/jobs"))).status).toBe(401);
+    expect((await jobGET(req("/api/jobs/job_x"), { params: Promise.resolve({ id: "job_x" }) })).status).toBe(401);
     const payload = JSON.stringify({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "route-1" });
     const noAuth = await jobsPOST(req("/api/jobs", { method: "POST", body: payload }));
     expect(noAuth.status).toBe(401);
@@ -85,14 +131,16 @@ describe("API routes", () => {
     const notJson = await jobsPOST(req("/api/jobs", { method: "POST", body: "{nope", headers: auth }));
     expect(notJson.status).toBe(400);
 
-    const status = await jobGET(req(`/api/jobs/${job.id}`), { params: Promise.resolve({ id: job.id }) });
+    const status = await jobGET(req(`/api/jobs/${job.id}`, { headers: auth }), { params: Promise.resolve({ id: job.id }) });
     expect(status.status).toBe(200);
     expect((await status.json()).activity.map((a: { type: string }) => a.type)).toContain("job.queued");
-    expect((await jobGET(req("/api/jobs/job_missing"), { params: Promise.resolve({ id: "job_missing" }) })).status).toBe(404);
-    expect((await jobGET(req("/api/jobs/x"), { params: Promise.resolve({ id: "x" }) })).status).toBe(400);
+    expect((await jobGET(req("/api/jobs/job_missing", { headers: auth }), { params: Promise.resolve({ id: "job_missing" }) })).status).toBe(404);
+    expect((await jobGET(req("/api/jobs/x", { headers: auth }), { params: Promise.resolve({ id: "x" }) })).status).toBe(400);
 
-    const list = await jobsGET(req("/api/jobs?status=bogus"));
-    expect(list.status).toBe(400);
+    expect((await jobsGET(req("/api/jobs?status=bogus", { headers: auth }))).status).toBe(400);
+    const list = await jobsGET(req("/api/jobs", { headers: auth }));
+    expect(list.status).toBe(200);
+    expect((await list.json()).jobs.some((j: { id: string }) => j.id === job.id)).toBe(true);
   });
 });
 

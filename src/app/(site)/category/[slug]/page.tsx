@@ -4,6 +4,7 @@ import { getServices } from "@/server/container";
 import { Chip } from "@/components/category-chips";
 import { VideoGrid } from "@/components/video-card";
 import { SORTS, parseSort } from "@/lib/nav";
+import { first, type RawSearchParams } from "@/lib/search-params";
 
 type Params = { slug: string };
 
@@ -14,9 +15,9 @@ export async function generateMetadata({ params }: { params: Promise<Params> }):
   return { title: category?.name ?? "Category" };
 }
 
-export default async function CategoryPage({ params, searchParams }: { params: Promise<Params>; searchParams: Promise<{ sort?: string }> }) {
+export default async function CategoryPage({ params, searchParams }: { params: Promise<Params>; searchParams: Promise<RawSearchParams> }) {
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const sort = parseSort(sp.sort);
+  const sort = parseSort(first(sp.sort));
   const { repos } = await getServices();
   const category = await repos.categories.getBySlug(slug);
   if (!category) notFound();

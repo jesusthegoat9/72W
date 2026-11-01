@@ -2,17 +2,13 @@ import type { Metadata } from "next";
 import { getServices } from "@/server/container";
 import { CategoryChips, Chip } from "@/components/category-chips";
 import { VideoGrid } from "@/components/video-card";
-import { SORTS, exploreHref, parseSort } from "@/lib/nav";
+import { SORTS, exploreHref } from "@/lib/nav";
+import { parseExploreParams, type RawSearchParams } from "@/lib/search-params";
 
 export const metadata: Metadata = { title: "Explore" };
 
-type Search = { q?: string; category?: string; sort?: string };
-
-export default async function ExplorePage({ searchParams }: { searchParams: Promise<Search> }) {
-  const sp = await searchParams;
-  const q = (sp.q ?? "").trim().slice(0, 100);
-  const category = sp.category && /^[a-z0-9-]+$/.test(sp.category) ? sp.category : undefined;
-  const sort = parseSort(sp.sort);
+export default async function ExplorePage({ searchParams }: { searchParams: Promise<RawSearchParams> }) {
+  const { q, category, sort } = parseExploreParams(await searchParams);
   const { repos } = await getServices();
   const [categories, videos] = await Promise.all([repos.categories.list(), repos.content.query({ q, categorySlug: category, sort, limit: 48 })]);
   const activeCategory = categories.find((c) => c.slug === category);

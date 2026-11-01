@@ -13,6 +13,20 @@ export interface NewJob {
   maxAttempts?: number;
 }
 
+/** Thrown when inserting a live job would exceed the daily live budget. */
+export class LiveBudgetExceededError extends Error {
+  constructor(readonly used: number, readonly max: number) {
+    super(`daily live job limit reached (${used}/${max})`);
+    this.name = "LiveBudgetExceededError";
+  }
+}
+
+export interface LiveBudget {
+  /** Count live jobs created at or after this ISO timestamp. */
+  since: string;
+  max: number;
+}
+
 export interface JobPatch {
   status?: JobStatus;
   provider_ref?: string | null;
@@ -51,32 +65,54 @@ export class JobsRepo {
     return row ? mapJob(row) : null;
   }
 
-  /** Inserts, or returns the existing job when the idempotency key is taken. */
-  async insert(input: NewJob): Promise<{ job: Job; created: boolean }> {
+  /**
+   * Inserts, or returns the existing job when the idempotency key is taken.
+   *
+   * For live jobs pass `liveBudget`: the insert is then conditional on the
+   * number of live jobs since `since` being below `max`, evaluated inside the
+   * same statement, so concurrent callers cannot all slip under the limit.
+   * A race on the idempotency key is resolved by the UNIQUE constraint and a
+   * re-read, never by a duplicate row.
+   */
+  async insert(input: NewJob, liveBudget?: LiveBudget): Promise<{ job: Job; created: boolean }> {
     const existing = await this.getByIdempotencyKey(input.idempotencyKey);
     if (existing) return { job: existing, created: false };
     const id = newId("job");
     const ts = nowIso();
-    await this.db
-      .prepare(
-        `INSERT INTO generation_jobs (id, agent_id, kind, status, idempotency_key, prompt, params, provider, dry_run,
-           attempts, max_attempts, created_at, updated_at)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-      )
-      .bind(
-        id,
-        input.agentId,
-        input.kind,
-        input.idempotencyKey,
-        input.prompt,
-        JSON.stringify(input.params ?? {}),
-        input.provider,
-        input.dryRun ? 1 : 0,
-        input.maxAttempts ?? 3,
-        ts,
-        ts,
-      )
-      .run();
+    const values: SqlValue[] = [
+      id,
+      input.agentId,
+      input.kind,
+      input.idempotencyKey,
+      input.prompt,
+      JSON.stringify(input.params ?? {}),
+      input.provider,
+      input.dryRun ? 1 : 0,
+      input.maxAttempts ?? 3,
+      ts,
+      ts,
+    ];
+    const columns = `(id, agent_id, kind, status, idempotency_key, prompt, params, provider, dry_run, attempts, max_attempts, created_at, updated_at)`;
+    const guarded = !input.dryRun && liveBudget;
+    const sql = guarded
+      ? `INSERT INTO generation_jobs ${columns}
+         SELECT ?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?
+         WHERE (SELECT COUNT(*) FROM generation_jobs WHERE dry_run = 0 AND created_at >= ?) < ?`
+      : `INSERT INTO generation_jobs ${columns} VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?)`;
+    if (guarded) values.push(liveBudget.since, liveBudget.max);
+    let changes = 0;
+    try {
+      changes = (await this.db.prepare(sql).bind(...values).run()).changes;
+    } catch (err) {
+      if (!/UNIQUE|constraint/i.test(String(err))) throw err;
+      const raced = await this.getByIdempotencyKey(input.idempotencyKey);
+      if (raced) return { job: raced, created: false };
+      throw err;
+    }
+    if (changes === 0) {
+      if (!guarded) throw new Error("job insert affected no rows");
+      throw new LiveBudgetExceededError(await this.countLiveSince(liveBudget.since), liveBudget.max);
+    }
     return { job: (await this.getById(id))!, created: true };
   }
 

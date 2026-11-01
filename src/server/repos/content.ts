@@ -187,6 +187,15 @@ export class ContentRepo {
     return r?.n ?? 0;
   }
 
+  /** Published content that owns this media key, or null. Used to decide whether media is public. */
+  async getPublishedByMediaKey(mediaKey: string): Promise<Content | null> {
+    const row = await this.db
+      .prepare("SELECT * FROM content WHERE media_key = ? AND status = 'published'")
+      .bind(mediaKey)
+      .first<ContentRow>();
+    return row ? mapContent(row) : null;
+  }
+
   async incrementViews(id: string): Promise<void> {
     await this.db.prepare("UPDATE content SET views = views + 1 WHERE id = ?").bind(id).run();
   }

@@ -91,8 +91,27 @@ export class PrunaVideoProvider implements VideoProvider {
     }
   }
 
+  /**
+   * Downloads a finished render. The API key is only ever sent to the Pruna
+   * API origin: any other host (or a redirect away from it) is refused
+   * outright rather than fetched without credentials, because a delivery URL
+   * that is not on the API origin is not one the docs describe.
+   */
   async download(outputUrl: string): Promise<VideoDownload> {
-    const res = await this.fetchImpl(outputUrl, { headers: this.headers() });
+    let target: URL;
+    try {
+      target = new URL(outputUrl);
+    } catch {
+      throw new ProviderError(`Pruna delivery URL is not a valid URL: ${outputUrl.slice(0, 80)}`, "pruna", false);
+    }
+    const allowed = new URL(this.baseUrl);
+    if (target.protocol !== "https:" || target.origin !== allowed.origin) {
+      throw new ProviderError(`refusing to send Pruna credentials to ${target.origin}`, "pruna", false);
+    }
+    const res = await this.fetchImpl(target.toString(), { headers: this.headers(), redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      throw new ProviderError(`Pruna delivery redirected (${res.status}) to ${res.headers.get("location") ?? "unknown"}; refusing to follow with credentials`, "pruna", false, res.status);
+    }
     if (!res.ok) throw new ProviderError(`Pruna download HTTP ${res.status}`, "pruna", res.status >= 500, res.status);
     const contentType = res.headers.get("content-type") ?? "video/mp4";
     return { bytes: new Uint8Array(await res.arrayBuffer()), contentType, extension: contentType.includes("mp4") ? "mp4" : "bin" };

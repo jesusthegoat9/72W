@@ -25,3 +25,15 @@ export function tokenMatches(provided: string | null, expected: string | null): 
   for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
   return diff === 0;
 }
+
+/**
+ * Guards the job endpoints. Returns a response to send (503 when no token is
+ * configured, 401 on a bad token) or null when the request is allowed.
+ */
+export function requireJobsToken(req: Request, token: string | null, what = "job endpoints") {
+  if (!token) return error(503, `${what} are disabled: JOBS_API_TOKEN is not configured`);
+  const auth = req.headers.get("authorization");
+  const provided = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!tokenMatches(provided, token)) return error(401, "invalid or missing bearer token");
+  return null;
+}

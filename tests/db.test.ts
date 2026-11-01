@@ -19,11 +19,40 @@ describe("seed + repositories", () => {
   it("seeds categories, agents and published content idempotently", async () => {
     const { repos } = await freshRepos();
     expect(await repos.agents.count()).toBe(5);
-    expect((await repos.categories.list()).map((c) => c.slug)).toContain("data-center-after-dark");
+    const slugs = (await repos.categories.list()).map((c) => c.slug);
+    expect(slugs).toContain("data-center-after-dark");
+    for (const s of ["fresh-out-the-box", "hardcore-processing", "group-compute", "hot-swaps", "thermal-paste", "unlimited-context", "no-rate-limits", "clean-builds"]) {
+      expect(slugs).toContain(s);
+      expect((await repos.content.query({ categorySlug: s })).length).toBeGreaterThanOrEqual(3);
+    }
     const before = await repos.content.count("any");
     const { seedCatalogue } = await import("@/server/seed");
     expect((await seedCatalogue(repos)).seeded).toBe(false);
     expect(await repos.content.count("any")).toBe(before);
+  });
+
+  it("seeds additively: missing categories and videos are added, existing rows untouched", async () => {
+    const { db, repos } = await freshRepos();
+    const { seedCatalogue } = await import("@/server/seed");
+    const before = await repos.content.count("any");
+    expect((await repos.categories.list()).length).toBe(16);
+
+    // Simulate an older database that predates one category.
+    const slug = "thermal-paste";
+    const cat = (await repos.categories.getBySlug(slug))!;
+    await db.prepare("DELETE FROM activity_log WHERE content_id IN (SELECT id FROM content WHERE category_id = ?)").bind(cat.id).run();
+    const removed = (await db.prepare("DELETE FROM content WHERE category_id = ?").bind(cat.id).run()).changes;
+    await db.prepare("DELETE FROM categories WHERE id = ?").bind(cat.id).run();
+    expect(removed).toBeGreaterThan(0);
+
+    const agentBefore = (await repos.agents.getByHandle("rackdaddy"))!;
+    const result = await seedCatalogue(repos);
+    expect(result).toMatchObject({ seeded: false, categories: 1, agents: 0, videos: removed });
+    expect(await repos.content.count("any")).toBe(before);
+    expect((await repos.agents.getByHandle("rackdaddy"))!.id).toBe(agentBefore.id);
+    expect((await repos.content.query({ categorySlug: slug })).length).toBe(removed);
+    // Running again changes nothing.
+    expect(await seedCatalogue(repos)).toMatchObject({ seeded: false, categories: 0, agents: 0, videos: 0 });
   });
 
   it("isolates content by agent", async () => {

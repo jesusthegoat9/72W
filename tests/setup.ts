@@ -9,3 +9,4 @@ process.env.JOBS_API_TOKEN = "test-token";
 process.env.GENERATION_LIVE = "false";
 process.env.GENERATION_DRY_RUN = "true";
 process.env.GENERATION_RETRY_BACKOFF_SECONDS = "0";
+process.env.SESSION_SECRET = "test-session-secret";

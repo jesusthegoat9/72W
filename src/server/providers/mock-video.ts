@@ -1,3 +1,4 @@
+import { ProviderError } from "./errors";
 import type { VideoDownload, VideoGenerationRequest, VideoPollResult, VideoProvider, VideoSubmitResult } from "./video";
 
 /**
@@ -11,9 +12,13 @@ export class MockVideoProvider implements VideoProvider {
   private readonly polls = new Map<string, number>();
   private readonly prompts = new Map<string, VideoGenerationRequest>();
 
-  constructor(private readonly opts: { pendingPolls?: number; failWhenPromptIncludes?: string } = {}) {}
+  /** Number of submit() calls, for tests asserting a render is never re-submitted. */
+  submits = 0;
+
+  constructor(private readonly opts: { pendingPolls?: number; failWhenPromptIncludes?: string; pollErrors?: number } = {}) {}
 
   async submit(req: VideoGenerationRequest): Promise<VideoSubmitResult> {
+    this.submits++;
     const ref = `mock_${Math.random().toString(36).slice(2, 10)}`;
     this.polls.set(ref, 0);
     this.prompts.set(ref, req);
@@ -25,6 +30,8 @@ export class MockVideoProvider implements VideoProvider {
     if (!req) return { state: "failed", error: "unknown providerRef", retryable: false };
     const n = (this.polls.get(providerRef) ?? 0) + 1;
     this.polls.set(providerRef, n);
+    // Simulates a transient status-endpoint outage (HTTP 5xx) on the first N polls.
+    if (n <= (this.opts.pollErrors ?? 0)) throw new ProviderError("mock status endpoint unavailable", "mock", true, 503);
     if (this.opts.failWhenPromptIncludes && req.prompt.includes(this.opts.failWhenPromptIncludes)) {
       return { state: "failed", error: "mock video provider: simulated failure", retryable: true };
     }

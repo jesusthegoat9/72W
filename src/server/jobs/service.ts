@@ -1,6 +1,7 @@
 import type { AppConfig } from "../config";
 import type { Job, JobKind, JobParams } from "../db/types";
 import type { Repos } from "../repos";
+import { LiveBudgetExceededError, type LiveBudget } from "../repos/jobs";
 
 export class ValidationError extends Error {
   constructor(message: string, readonly field?: string) {
@@ -28,6 +29,11 @@ export interface EnqueueInput {
 
 export function startOfUtcDay(now: Date): string {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+}
+
+/** Budget for today, applied atomically at insert time. */
+export function liveBudgetFor(config: AppConfig, now: Date): LiveBudget {
+  return { since: startOfUtcDay(now), max: config.maxLiveJobsPerDay };
 }
 
 export class JobService {
@@ -67,24 +73,29 @@ export class JobService {
 
     const wantsLive = input.live === true && !this.config.dryRunDefault ? true : input.live === true;
     const dryRun = !wantsLive;
-    if (!dryRun) {
-      if (!this.config.liveGenerationEnabled) throw new LimitExceededError("live generation is disabled (GENERATION_LIVE is off)");
-      const used = await this.repos.jobs.countLiveSince(startOfUtcDay(this.now()));
-      if (used >= this.config.maxLiveJobsPerDay)
-        throw new LimitExceededError(`daily live job limit reached (${used}/${this.config.maxLiveJobsPerDay})`);
-    }
+    if (!dryRun && !this.config.liveGenerationEnabled) throw new LimitExceededError("live generation is disabled (GENERATION_LIVE is off)");
 
     const idempotencyKey = input.idempotencyKey?.trim() || `${agent.handle}:${input.kind}:${params.categorySlug}:${hashPrompt(prompt)}:${dryRun ? "dry" : "live"}`;
-    const { job, created } = await this.repos.jobs.insert({
-      agentId: agent.id,
-      kind: input.kind,
-      idempotencyKey,
-      prompt,
-      params,
-      provider: dryRun ? "mock" : input.kind === "text" ? "openrouter" : "pruna",
-      dryRun,
-      maxAttempts: input.maxAttempts ?? this.config.maxAttempts,
-    });
+    let inserted: { job: Job; created: boolean };
+    try {
+      inserted = await this.repos.jobs.insert(
+        {
+          agentId: agent.id,
+          kind: input.kind,
+          idempotencyKey,
+          prompt,
+          params,
+          provider: dryRun ? "mock" : input.kind === "text" ? "openrouter" : "pruna",
+          dryRun,
+          maxAttempts: input.maxAttempts ?? this.config.maxAttempts,
+        },
+        dryRun ? undefined : liveBudgetFor(this.config, this.now()),
+      );
+    } catch (err) {
+      if (err instanceof LiveBudgetExceededError) throw new LimitExceededError(err.message);
+      throw err;
+    }
+    const { job, created } = inserted;
     if (created) {
       await this.repos.activity.log({
         type: "job.queued",

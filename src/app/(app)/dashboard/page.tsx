@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { getServices } from "@/server/container";
-import { SESSION_COOKIE } from "@/lib/session";
+import { SESSION_COOKIE, verifySession } from "@/lib/session";
 import { Avatar } from "@/components/avatar";
 import { Badge } from "@/components/ui/section";
 import { timeAgo } from "@/lib/format";
@@ -15,7 +15,7 @@ const statusTone: Record<JobStatus, "muted" | "ok" | "warn" | "danger"> = { queu
 export default async function DashboardPage() {
   const { repos, config } = await getServices();
   const now = new Date();
-  const hasSession = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
+  const hasSession = Boolean(await verifySession((await cookies()).get(SESSION_COOKIE)?.value, process.env.SESSION_SECRET));
   const [agents, published, drafts, jobCounts, jobs, activity, generated] = await Promise.all([
     repos.agents.list(),
     repos.content.count("published"),

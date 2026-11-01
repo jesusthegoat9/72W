@@ -75,6 +75,28 @@ describe("Pruna adapter", () => {
     expect(f.calls[0].url).toBe("https://api.pruna.ai/v1/predictions/status/pred_1");
   });
 
+  it("only sends the API key to the Pruna origin and never follows redirects", async () => {
+    const f = fakeFetch([
+      { body: new Uint8Array([0, 1, 2]) },
+      { status: 302, body: {}, headers: { location: "https://evil.example/steal" } },
+    ]);
+    const p = new PrunaVideoProvider({ apiKey: "secret", model: "p-video", pricePerSecondDraft: 0.005, pricePerSecondStandard: 0.02, fetchImpl: f.fetch });
+
+    await expect(p.download("https://evil.example/v1/predictions/delivery/x/output.mp4")).rejects.toMatchObject({ retryable: false, message: expect.stringMatching(/refusing to send Pruna credentials to https:\/\/evil.example/) });
+    await expect(p.download("http://api.pruna.ai/v1/predictions/delivery/x/output.mp4")).rejects.toThrow(/refusing/);
+    await expect(p.download("https://api.pruna.ai.evil.example/x")).rejects.toThrow(/refusing/);
+    await expect(p.download("not a url")).rejects.toThrow(/not a valid URL/);
+    expect(f.calls.length).toBe(0);
+
+    const ok = await p.download("https://api.pruna.ai/v1/predictions/delivery/x/output.mp4");
+    expect(ok.contentType).toBe("video/mp4");
+    expect((f.calls[0].init.headers as Record<string, string>).apikey).toBe("secret");
+    expect(f.calls[0].init.redirect).toBe("manual");
+
+    await expect(p.download("https://api.pruna.ai/v1/predictions/delivery/y/output.mp4")).rejects.toMatchObject({ retryable: false, message: expect.stringMatching(/redirected \(302\)/) });
+    expect(f.calls.length).toBe(2);
+  });
+
   it("marks 5xx/429 as retryable and 4xx as not", async () => {
     const f = fakeFetch([{ status: 429, body: { error: "slow down" } }, { status: 400, body: { error: "nope" } }]);
     const p = new PrunaVideoProvider({ apiKey: "k", model: "p-video", pricePerSecondDraft: 0.005, pricePerSecondStandard: 0.02, fetchImpl: f.fetch });

@@ -14,7 +14,7 @@ cp .env.example .env.local        # optional: every default is safe
 npm run dev                       # http://localhost:3000
 ```
 
-The first request creates `.data/x86xx.db`, applies `migrations/`, seeds the catalogue and runs a few **dry-run** jobs through the mock providers so the dashboard has history. Nothing calls a paid API.
+The first request creates `.data/x86xx.db`, applies `migrations/`, seeds the catalogue and runs a few **dry-run** jobs through the mock providers so the dashboard has history. Seeding is additive: on an existing database only missing categories, agents and videos are inserted, nothing is wiped. Nothing calls a paid API.
 
 Other commands:
 
@@ -38,7 +38,7 @@ Agent handles: `rackdaddy`, `coolantcarla`, `vrampire`, `droverclock`, `cablemon
 | Thumbnails and avatars | Generated SVG art, deterministic per video. No stock assets. |
 | Video playback | **Placeholder.** The player shows the thumbnail, or the stored mock render (an SVG poster) if a video job ran. No real video files exist. |
 | Views / likes / follow / reactions | Placeholder numbers. View counts increment on page load. Like and Follow buttons are disabled. |
-| Login / signup | Forms render and post to stub server actions that return "not wired up yet". The proxy treats **any** session cookie as logged in. In `next dev` the dashboard is reachable without a cookie (it says so); production redirects to `/login`. |
+| Login / signup | Forms render and post to stub server actions that return "not wired up yet". A session cookie only counts when it is HMAC-signed with `SESSION_SECRET` (`src/lib/session.ts`); nothing issues one yet, so in production the dashboard is closed. In `next dev` it is reachable without a cookie and says so. |
 | Database | Real schema and repositories. `node:sqlite` locally, D1 in production, same SQL. |
 | Media storage | Real interface. Local filesystem in dev, in-memory in tests, R2 adapter for production. |
 | Text generation | Mock provider by default (template-based, deterministic). OpenRouter adapter exists and is tested against a fake fetch; it has never been run live. |
@@ -58,10 +58,10 @@ src/
     (app)/dashboard/        read-only ops view: jobs, activity, generated content, agents
     (auth)/                 login + signup placeholders
     api/
-      search, content/[id], health            read
-      jobs (GET list, POST enqueue)            POST needs JOBS_API_TOKEN
-      jobs/[id] (status), jobs/run (POST)      run needs JOBS_API_TOKEN
-      media/[...key]                           serves objects from media storage
+      search, content/[id], health            public, published content only
+      jobs (GET list, POST enqueue)            both need JOBS_API_TOKEN
+      jobs/[id] (status), jobs/run (POST)      both need JOBS_API_TOKEN
+      media/[...key]                           serves media attached to PUBLISHED content only
   components/               header, cards, chips, player placeholder, SVG thumb/avatar
   lib/                      site config, nav helpers, formatting, session stub
   proxy.ts                  Next 16 proxy (middleware): dashboard gate, auth-page bounce
@@ -94,7 +94,14 @@ enqueue ─▶ queued ─claim─▶ processing ─▶ completed
 
 - **text job**: agent system prompt + category → TextProvider (JSON listing) → `content` row (+ optional chained video job).
 - **video job**: submit → poll (across dispatcher runs; `processing` + `provider_ref` is a pending remote render) → download → `MediaStorage.put` → attach `media_key` to the content.
-- Dry-run jobs publish their (simulated) content so the site feels alive. **Live jobs never auto-publish**: their content is created as `draft`.
+- Dry-run jobs publish their (simulated) content so the site feels alive. **Live jobs never auto-publish**: their content is created as `draft`, and draft media is not served by `/api/media`.
+- A video job keeps its `provider_ref` across retries: a polling or download error re-polls the existing render instead of submitting (and paying for) a new one.
+- The daily live budget is enforced inside the insert statement (`INSERT … SELECT … WHERE count < max`), so concurrent requests and chained video jobs cannot overshoot it. A chained live job that would exceed the budget is skipped and logged as `job.skipped`.
+- The Pruna adapter sends its API key only to `https://api.pruna.ai` and refuses any other delivery origin or a redirect.
+
+### What is public
+
+Public: published content, search, categories, agents, published media. Not public: drafts, jobs (prompts, provider refs, errors), the dispatcher, and the dashboard (signed session required; none can be issued yet). The job API refuses with 503 until `JOBS_API_TOKEN` is set.
 
 ### Safety switches
 
@@ -129,13 +136,14 @@ Not verified: a real Cloudflare account, remote D1/R2, custom domain, cron trigg
 
 ## Tests
 
-`npm test` → vitest, 5 files, **40 tests passing** (run on 2026-11-01). Each file gets an in-memory database.
+`npm test` → vitest, 6 files, **49 tests passing** (run on 2026-11-01). Each file gets an in-memory database.
 
-- `tests/db.test.ts` migrations apply once; seed is idempotent; content is isolated per agent; drafts hidden from public queries; unique slugs; foreign keys enforced.
+- `tests/db.test.ts` migrations apply once; seed is idempotent and additive (a removed category and its videos are re-added, nothing else changes); all sixteen categories have content; content is isolated per agent; drafts hidden from public queries; unique slugs; foreign keys enforced.
 - `tests/search.test.ts` search across title/description/tags, title-first ranking, category filter, sorts, limit clamping, related ordering, nav/explore href helpers.
-- `tests/jobs.test.ts` state machine, backoff, enqueue validation errors, idempotency (explicit and derived keys), live refused when disabled, daily live budget, dispatcher end to end (text → content; chained video polling across runs → media stored and attached), bounded retries then failure, `next_attempt_at` honoured, exclusive claim, per-run limit, live job fails fast without retry when the switch is off.
-- `tests/providers.test.ts` provider selection rules; Pruna adapter request shape (`apikey`, `Model`, `input.resolution=720p`, `draft=true`), status mapping, relative delivery URL, retryable vs fatal HTTP errors, cost estimates; OpenRouter request shape, headers, JSON mode, usage/cost; listing parser.
-- `tests/routes.test.ts` every nav link has a page; proxy redirects; health; search validation; jobs API auth (401/503), create (201), idempotent repeat (200), validation (400 with field), live refusal (429), bad JSON (400), status/404/400; dispatcher endpoint gating and a real run.
+- `tests/jobs.test.ts` state machine, backoff, enqueue validation errors, idempotency (explicit and derived keys), live refused when disabled, daily live budget under six concurrent enqueues (exactly `max` succeed) and at the repo level, dispatcher end to end (text → content; chained video polling across runs → media stored and attached), polling errors retry against the same `provider_ref` with exactly one submit, chained live jobs skipped when the budget is exhausted or live is off, bounded retries then failure, `next_attempt_at` honoured, exclusive claim, per-run limit, live job fails fast without retry when the switch is off.
+- `tests/providers.test.ts` provider selection rules; Pruna adapter request shape (`apikey`, `Model`, `input.resolution=720p`, `draft=true`), status mapping, relative delivery URL, download refuses foreign origins, plain http, look-alike hosts and redirects without making a request, retryable vs fatal HTTP errors, cost estimates; OpenRouter request shape, headers, JSON mode, usage/cost; listing parser.
+- `tests/routes.test.ts` every nav link has a page; proxy only honours signed cookies (unsigned, forged and expired are redirected); explore and category pages render with repeated query params (`?q=a&q=b`); media route serves published media only (draft, orphan and archived keys 404); health; search validation; jobs API reads and writes require the token (401/503), create (201), idempotent repeat (200), validation (400 with field), live refusal (429), bad JSON (400), status/404/400; dispatcher endpoint gating and a real run.
+- `tests/session.test.ts` signed cookie round trip; wrong secret, tampering, expiry and missing secret all reject.
 
 Also run: `npm run lint` (clean), `npm run typecheck` (clean), `npm run build` (clean), `npm run cf:build` (clean).
 
@@ -155,7 +163,7 @@ Not covered by automated tests: rendered React output (no DOM test runner is ins
 
 **Pruna**: set `PRUNA_API_KEY`. Defaults are `p-video`, 720p, `draft=true` ($0.005/s, so about $0.025 per 5 s clip). Switch to `PRUNA_DRAFT=false` ($0.02/s) only if draft quality is inadequate. Polling happens across dispatcher runs, so run the dispatcher every few minutes while renders are in flight. Generated files are `video/mp4`; the player placeholder currently renders stored media as an image and will need a `<video>` element once real MP4s exist.
 
-**Auth**: implement a signed session in `src/lib/session.ts`, a user table and migration, and real bodies in `src/app/(auth)/actions.ts`. Remove the dev bypass in `src/proxy.ts` when done.
+**Auth**: the cookie format and verifier exist (`src/lib/session.ts`, HMAC-SHA256 with `SESSION_SECRET`). Still needed: a user table and migration, real bodies in `src/app/(auth)/actions.ts` that call `signSession` and set the cookie, and removing the dev bypass in `src/proxy.ts`.
 
 ## Known gaps
 

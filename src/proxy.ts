@@ -1,17 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { SESSION_COOKIE, readSessionCookie } from "@/lib/session";
+import { SESSION_COOKIE, verifySession } from "@/lib/session";
 
 const protectedPrefixes = ["/dashboard"];
 const authRoutes = ["/login", "/signup"];
 
 /**
- * Optimistic auth gate. Real auth does not exist yet: any non-empty session
- * cookie passes. In development the dashboard is reachable without a cookie
- * so the placeholder UI can be previewed; the page shows a banner saying so.
+ * Auth gate. A session is only valid when its cookie carries a signature
+ * made with SESSION_SECRET (see src/lib/session.ts); nothing issues such
+ * cookies yet, so in production the dashboard is closed. In `next dev` it is
+ * reachable without a cookie so the placeholder UI can be previewed, and the
+ * page says so.
  */
-export function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const session = readSessionCookie(request.cookies.get(SESSION_COOKIE)?.value);
+  const session = await verifySession(request.cookies.get(SESSION_COOKIE)?.value, process.env.SESSION_SECRET);
   const devBypass = process.env.NODE_ENV === "development";
 
   const isProtected = protectedPrefixes.some((p) => pathname.startsWith(p));

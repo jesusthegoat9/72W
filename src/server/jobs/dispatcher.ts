@@ -6,6 +6,8 @@ import { parseListing } from "../providers/text";
 import type { Repos } from "../repos";
 import type { MediaStorage } from "../storage/media";
 import { assertTransition, resolveFailure } from "./lifecycle";
+import { LiveBudgetExceededError } from "../repos/jobs";
+import { liveBudgetFor } from "./service";
 
 export interface DispatcherDeps {
   repos: Repos;
@@ -140,17 +142,16 @@ export async function runDispatcher(deps: DispatcherDeps, opts: { limit?: number
     await repos.activity.log({ type: "content.created", message: `${agent.name} created "${listing.title}"`, agentId: agent.id, jobId: job.id, contentId: content.id, simulated: result.simulated, meta: { status: content.status } });
 
     if (job.params.withVideo) {
-      const { job: videoJob, created } = await repos.jobs.insert({
-        agentId: agent.id,
-        kind: "video",
-        idempotencyKey: `${job.id}:video`,
+      const chained = await chainVideoJob({ repos, config, now }, job, {
+        contentId: content.id,
+        categorySlug: category.slug,
         prompt: `${listing.title}. ${listing.description}`,
-        params: { contentId: content.id, categorySlug: category.slug, resolution: job.params.resolution ?? config.pruna.resolution, draft: job.params.draft ?? config.pruna.draft, durationSeconds: job.params.durationSeconds ?? config.pruna.durationSeconds },
-        provider: job.dryRun ? "mock" : "pruna",
-        dryRun: job.dryRun,
-        maxAttempts: job.max_attempts,
+        title: listing.title,
+        agentName: agent.name,
       });
-      if (created) await repos.activity.log({ type: "job.queued", message: `${agent.name} queued a video job for "${listing.title}"`, agentId: agent.id, jobId: videoJob.id, contentId: content.id, simulated: job.dryRun });
+      if (chained.skipped) {
+        await repos.jobs.update(job.id, { result: { contentId: content.id, provider: result.provider, model: result.model, usage: result.usage, estimatedCostUsd: result.estimatedCostUsd, simulated: result.simulated, videoJob: `skipped: ${chained.reason}` } });
+      }
     }
     return "completed";
   }
@@ -166,6 +167,9 @@ export async function runDispatcher(deps: DispatcherDeps, opts: { limit?: number
   }
 
   async function startVideo(job: Job, providers: Providers): Promise<"completed" | "pending"> {
+    // A retry after a polling/download error must not submit a second render:
+    // the remote job already exists, so pick it up by its reference.
+    if (job.provider_ref) return continueVideo(job, providers);
     const req = videoRequest(job);
     const { providerRef } = await providers.video.submit(req);
     await repos.jobs.update(job.id, { provider_ref: providerRef, result: { estimatedCostUsd: providers.video.estimateCostUsd(req), resolution: req.resolution, draft: req.draft } });
@@ -186,5 +190,60 @@ export async function runDispatcher(deps: DispatcherDeps, opts: { limit?: number
     await repos.jobs.update(job.id, { content_id: contentId, result: { ...(job.result ?? {}), mediaKey: key, contentType: file.contentType, bytes: file.bytes.byteLength, simulated: providers.video.simulated, metadata: poll.metadata ?? null } });
     await repos.activity.log({ type: "media.stored", message: `Stored ${key} (${file.bytes.byteLength} bytes)`, agentId: job.agent_id, jobId: job.id, contentId, simulated: providers.video.simulated });
     return "completed";
+  }
+}
+
+export interface ChainVideoInput {
+  contentId: string;
+  categorySlug: string;
+  prompt: string;
+  title: string;
+  agentName: string;
+}
+
+/**
+ * Queues the follow-up video job for a finished text job. Inherits dry-run
+ * status and attempts from the parent. Live chained jobs are subject to the
+ * same atomic daily budget as jobs created through the API; when the budget
+ * is exhausted the chain is skipped and recorded, never forced.
+ */
+export async function chainVideoJob(
+  ctx: { repos: Repos; config: AppConfig; now?: () => Date },
+  parent: Job,
+  input: ChainVideoInput,
+): Promise<{ skipped: false; job: Job; created: boolean } | { skipped: true; reason: string }> {
+  const { repos, config } = ctx;
+  const now = ctx.now ?? (() => new Date());
+  if (!parent.dryRun && !config.liveGenerationEnabled) {
+    const reason = "live generation is disabled";
+    await repos.activity.log({ type: "job.skipped", message: `Video job for "${input.title}" skipped: ${reason}`, agentId: parent.agent_id, jobId: parent.id, contentId: input.contentId, simulated: false });
+    return { skipped: true, reason };
+  }
+  try {
+    const { job, created } = await repos.jobs.insert(
+      {
+        agentId: parent.agent_id,
+        kind: "video",
+        idempotencyKey: `${parent.id}:video`,
+        prompt: input.prompt,
+        params: {
+          contentId: input.contentId,
+          categorySlug: input.categorySlug,
+          resolution: parent.params.resolution ?? config.pruna.resolution,
+          draft: parent.params.draft ?? config.pruna.draft,
+          durationSeconds: parent.params.durationSeconds ?? config.pruna.durationSeconds,
+        },
+        provider: parent.dryRun ? "mock" : "pruna",
+        dryRun: parent.dryRun,
+        maxAttempts: parent.max_attempts,
+      },
+      parent.dryRun ? undefined : liveBudgetFor(config, now()),
+    );
+    if (created) await repos.activity.log({ type: "job.queued", message: `${input.agentName} queued a video job for "${input.title}"`, agentId: parent.agent_id, jobId: job.id, contentId: input.contentId, simulated: parent.dryRun });
+    return { skipped: false, job, created };
+  } catch (err) {
+    if (!(err instanceof LiveBudgetExceededError)) throw err;
+    await repos.activity.log({ type: "job.skipped", message: `Video job for "${input.title}" skipped: ${err.message}`, agentId: parent.agent_id, jobId: parent.id, contentId: input.contentId, simulated: false, meta: { used: err.used, max: err.max } });
+    return { skipped: true, reason: err.message };
   }
 }
