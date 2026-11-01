@@ -261,27 +261,30 @@ describe("dispatcher", () => {
     expect(await chainVideoJob({ repos, config }, dryParent, input)).toMatchObject({ skipped: false, created: true });
   });
 
-  it("recovers jobs orphaned in processing and leaves remote renders alone", async () => {
+  it("recovers jobs whose lease lapsed and leaves live leases and remote renders alone", async () => {
     const { repos } = await freshRepos();
     const svc = new JobService(repos, testConfig());
     const { job: orphan } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "orphan" });
     const { job: spent } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "spent", maxAttempts: 1 });
     const { job: remote } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "video", idempotencyKey: "remote" });
-    const { job: fresh } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "fresh" });
-    const longAgo = "2026-01-01T00:00:00.000Z";
-    for (const j of [orphan, spent, remote]) expect(await repos.jobs.claim(j.id, longAgo)).toBe(true);
+    const { job: alive } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text", idempotencyKey: "alive" });
+    const lapsed = { owner: "dead", now: "2026-01-01T00:00:00.000Z", until: "2026-01-01T00:01:00.000Z" };
+    for (const j of [orphan, spent, remote]) expect(await repos.jobs.claim(j.id, lapsed)).toBe(true);
     await repos.jobs.update(remote.id, { provider_ref: "mock_remote" });
-    expect(await repos.jobs.claim(fresh.id, new Date().toISOString())).toBe(true);
+    const future = new Date(Date.now() + 60_000).toISOString();
+    expect(await repos.jobs.claim(alive.id, { owner: "busy", now: new Date().toISOString(), until: future })).toBe(true);
 
-    const d = deps(repos, { staleAfterSeconds: 60 }, { text: new MockTextProvider(), video: new MockVideoProvider() });
-    const r = await runDispatcher(d);
+    const video = new MockVideoProvider();
+    const d = deps(repos, {}, { text: new MockTextProvider(), video });
+    const r = await runDispatcher({ ...d, workerId: "rescuer" });
     expect(r.recovered).toBe(2);
-    expect((await repos.jobs.getById(orphan.id))!.status).toBe("completed"); // requeued, then run in the same pass
-    expect((await repos.jobs.getById(orphan.id))!.attempts).toBe(2);
-    expect((await repos.jobs.getById(spent.id))!).toMatchObject({ status: "failed", last_error: expect.stringMatching(/stale/) });
-    expect((await repos.jobs.getById(fresh.id))!.status).toBe("processing"); // recent: not touched
+    expect((await repos.jobs.getById(orphan.id))!).toMatchObject({ status: "completed", attempts: 2, lease_owner: null });
+    expect((await repos.jobs.getById(spent.id))!).toMatchObject({ status: "failed", last_error: expect.stringMatching(/lease lapsed/) });
+    expect((await repos.jobs.getById(alive.id))!).toMatchObject({ status: "processing", lease_owner: "busy" }); // still leased: untouched
     const remoteAfter = (await repos.jobs.getById(remote.id))!;
-    expect(remoteAfter.provider_ref).toBe("mock_remote"); // still polled, never requeued
+    expect(remoteAfter.provider_ref).toBe("mock_remote"); // polled under a new lease, never requeued or re-submitted
+    expect(remoteAfter.attempts).toBe(1);
+    expect(video.submits).toBe(0);
   });
 
   it("rejects patches to columns that are not updatable", async () => {
@@ -305,8 +308,9 @@ describe("dispatcher", () => {
     const svc = new JobService(repos, testConfig());
     const { job } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text" });
     const now = new Date().toISOString();
-    expect(await repos.jobs.claim(job.id, now)).toBe(true);
-    expect(await repos.jobs.claim(job.id, now)).toBe(false);
+    const lease = { owner: "w1", now, until: new Date(Date.now() + 60_000).toISOString() };
+    expect(await repos.jobs.claim(job.id, lease)).toBe(true);
+    expect(await repos.jobs.claim(job.id, { ...lease, owner: "w2" })).toBe(false);
   });
 
   it("respects maxJobsPerRun", async () => {

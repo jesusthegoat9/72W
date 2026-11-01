@@ -7,7 +7,7 @@ describe("migrations", () => {
   it("apply once and are recorded", async () => {
     const db = new SqliteDatabase(":memory:");
     const first = await migrate(db);
-    expect(first).toEqual(["0001_init.sql", "0002_indexes.sql"]);
+    expect(first).toEqual(["0001_init.sql", "0002_indexes.sql", "0003_leases.sql"]);
     const second = await migrate(db);
     expect(second).toEqual([]);
     const tables = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all<{ name: string }>();
@@ -33,7 +33,7 @@ describe("migrations", () => {
     // A database created before 0002 existed picks it up on the next run.
     const indexes = (await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all<{ name: string }>()).map((i) => i.name);
     expect(indexes).not.toContain("idx_content_media_key");
-    expect(await migrate(db)).toEqual(["0002_indexes.sql"]);
+    expect(await migrate(db)).toEqual(["0002_indexes.sql", "0003_leases.sql"]);
     const after = (await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all<{ name: string }>()).map((i) => i.name);
     expect(after).toEqual(expect.arrayContaining(["idx_content_media_key", "idx_activity_job", "idx_activity_content", "idx_jobs_processing"]));
   });

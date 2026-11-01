@@ -93,6 +93,9 @@ export interface JobRow {
   next_attempt_at: string | null;
   started_at: string | null;
   completed_at: string | null;
+  /** Dispatcher currently holding the job, and when its lease lapses unless renewed. */
+  lease_owner: string | null;
+  lease_expires_at: string | null;
   created_at: string;
   updated_at: string;
 }

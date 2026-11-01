@@ -60,7 +60,22 @@ function mapCard(row: CardRow): ContentCard {
 export class ContentRepo {
   constructor(private readonly db: SqlDatabase) {}
 
+  /** The content row produced by a job, if any. One job yields at most one row. */
+  async getByJobId(jobId: string): Promise<Content | null> {
+    const row = await this.db.prepare("SELECT * FROM content WHERE job_id = ?").bind(jobId).first<ContentRow>();
+    return row ? mapContent(row) : null;
+  }
+
+  /**
+   * Inserts content. When `jobId` is set the insert is idempotent per job:
+   * if a row for that job already exists (another worker got there first)
+   * it is returned instead, guaranteed by the unique index on job_id.
+   */
   async insert(input: NewContent): Promise<Content> {
+    if (input.jobId) {
+      const existing = await this.getByJobId(input.jobId);
+      if (existing) return existing;
+    }
     const id = newId("vid");
     const ts = input.createdAt ?? nowIso();
     const status = input.status ?? "draft";
@@ -99,7 +114,12 @@ export class ContentRepo {
           .run();
         return (await this.getById(id))!;
       } catch (err) {
-        if (!/UNIQUE.*slug|content\.slug/i.test(String(err))) throw err;
+        const text = String(err);
+        if (input.jobId && /content\.job_id|uq_content_job/i.test(text)) {
+          const raced = await this.getByJobId(input.jobId);
+          if (raced) return raced;
+        }
+        if (!/UNIQUE.*slug|content\.slug/i.test(text)) throw err;
       }
     }
     throw new Error(`could not allocate a unique slug for "${input.title}"`);
