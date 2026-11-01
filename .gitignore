@@ -42,3 +42,11 @@ next-env.d.ts
 
 # keep the example env file
 !.env.example
+
+# local data (sqlite db, media files)
+/.data
+
+# cloudflare
+/.open-next
+/.wrangler
+.dev.vars

@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "x86xx",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": { "directory": ".open-next/assets", "binding": "ASSETS" },
+  "services": [{ "binding": "WORKER_SELF_REFERENCE", "service": "x86xx" }],
+  "vars": {
+    "DATA_BACKEND": "cloudflare",
+    "GENERATION_LIVE": "false",
+    "GENERATION_DRY_RUN": "true"
+    // MEDIA_PUBLIC_URL: set to the R2 bucket's custom domain once one exists.
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "x86xx",
+      // Placeholder. `wrangler d1 create x86xx` prints the real id. Local dev works with this value.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "x86xx-media" }]
+  // Not configured yet (see README "Connecting Cloudflare"):
+  // - NEXT_INC_CACHE_R2_BUCKET for the Next incremental cache (only needed for ISR / "use cache")
+  // - triggers.crons + a custom worker entry for the scheduled dispatcher
+}

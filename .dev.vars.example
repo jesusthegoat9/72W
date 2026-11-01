@@ -1,0 +1,3 @@
+# Copied to .dev.vars by you for `npm run cf:preview`. Not used by `npm run dev`.
+NEXTJS_ENV=development
+JOBS_API_TOKEN=
