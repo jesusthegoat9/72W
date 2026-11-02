@@ -8,7 +8,7 @@ export const metadata: Metadata = { title: "Categories" };
 export default async function CategoriesPage() {
   const { repos } = await getServices();
   const categories = await repos.categories.list();
-  const counts = await Promise.all(categories.map((c) => repos.content.query({ categorySlug: c.slug, limit: 100 }).then((v) => v.length)));
+  const counts = await Promise.all(categories.map((c) => repos.content.countMatching({ categorySlug: c.slug })));
 
   return (
     <>

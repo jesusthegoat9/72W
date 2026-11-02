@@ -11,7 +11,9 @@ import { GET as healthGET } from "@/app/api/health/route";
 import { GET as mediaGET } from "@/app/api/media/[...key]/route";
 import { signSession } from "@/lib/session";
 import { parseExploreParams } from "@/lib/search-params";
+import { PAGE_SIZE } from "@/lib/paging";
 import { getServices } from "@/server/container";
+import { renderText } from "./helpers";
 
 type Init = { method?: string; body?: string; headers?: Record<string, string>; cookie?: string };
 const req = (url: string, init: Init = {}) => {
@@ -48,10 +50,13 @@ describe("navigation", () => {
   });
 
   it("explore page tolerates repeated and odd query params", async () => {
-    expect(parseExploreParams({ q: ["rack", "other"], sort: ["views"], category: ["hot-racks", "x"] })).toEqual({ q: "rack", category: "hot-racks", sort: "views" });
+    expect(parseExploreParams({ q: ["rack", "other"], sort: ["views"], category: ["hot-racks", "x"] })).toEqual({ q: "rack", category: "hot-racks", sort: "views", page: 1 });
     expect(parseExploreParams({ q: "  a".padEnd(200, "b") })).toMatchObject({ q: expect.stringMatching(/^a?b+$/) });
-    expect(parseExploreParams({ category: "Hot Racks", sort: "nope" })).toEqual({ q: "", category: undefined, sort: "trending" });
-    expect(parseExploreParams({})).toEqual({ q: "", category: undefined, sort: "trending" });
+    expect(parseExploreParams({ category: "Hot Racks", sort: "nope" })).toEqual({ q: "", category: undefined, sort: "trending", page: 1 });
+    expect(parseExploreParams({})).toEqual({ q: "", category: undefined, sort: "trending", page: 1 });
+    expect(parseExploreParams({ page: "3" }).page).toBe(3);
+    expect(parseExploreParams({ page: ["2", "9"] }).page).toBe(2);
+    for (const bad of ["0", "-1", "abc", "1.5", "1e3", "99999999", ""]) expect(parseExploreParams({ page: bad }).page, bad).toBe(1);
 
     const { default: ExplorePage } = await import("@/app/(site)/explore/page");
     // `?q=rack&q=rack` arrives as an array; this used to throw on `.trim()`.
@@ -59,6 +64,37 @@ describe("navigation", () => {
     expect(el).toBeTruthy();
     const { default: CategoryPage } = await import("@/app/(site)/category/[slug]/page");
     expect(await CategoryPage({ params: Promise.resolve({ slug: "hot-racks" }), searchParams: Promise.resolve({ sort: ["views", "newest"] }) })).toBeTruthy();
+  });
+
+  it("explore and category pages paginate and clamp out-of-range pages", async () => {
+    const { repos } = await getServices();
+    const total = await repos.content.countMatching({});
+    expect(total).toBeGreaterThan(PAGE_SIZE); // the seed catalogue needs more than one page for this test to mean anything
+    const { default: ExplorePage } = await import("@/app/(site)/explore/page");
+    const render = async (sp: Record<string, string | string[]>) => renderText(ExplorePage({ searchParams: Promise.resolve(sp) }));
+    const p1 = await render({});
+    const p2 = await render({ page: "2" });
+    const pLast = await render({ page: "9999" });
+    expect(p1).toContain(`Showing 1–${PAGE_SIZE} of ${total}`);
+    expect(p1).toContain("/explore?page=2");
+    expect(p2).toContain(`Showing ${PAGE_SIZE + 1}–${Math.min(2 * PAGE_SIZE, total)} of ${total}`);
+    expect(p2).toContain(`Page 2 of ${Math.ceil(total / PAGE_SIZE)}`);
+    expect(p2).toContain("← Previous"); // links back to plain /explore, page 1 is the default
+    // Beyond the last page shows the last page rather than an empty grid.
+    const pages = Math.ceil(total / PAGE_SIZE);
+    expect(pLast).toContain(`Page ${pages} of ${pages}`);
+    expect(pLast).not.toContain("No videos in this filter");
+    // Filters survive the page links.
+    const filtered = await render({ q: "rack", sort: "newest", page: "1" });
+    expect(filtered).toContain("Results for “rack”");
+    if (filtered.includes("Page 1 of") && !filtered.includes("Page 1 of 1")) expect(filtered).toContain("/explore?q=rack&sort=newest&page=2");
+
+    const { default: CategoryPage } = await import("@/app/(site)/category/[slug]/page");
+    const catTotal = await repos.content.countMatching({ categorySlug: "hot-racks" });
+    const cat = await renderText(CategoryPage({ params: Promise.resolve({ slug: "hot-racks" }), searchParams: Promise.resolve({ page: "7", sort: "views" }) }));
+    expect(cat).toContain("Hot Racks");
+    if (catTotal > PAGE_SIZE) expect(cat).toContain("/category/hot-racks?sort=views&page=");
+    else expect(cat).not.toContain("Page 1 of");
   });
 });
 
@@ -185,19 +221,35 @@ describe("public agent activity", () => {
     expect(pub.some((a) => a.contentSlug === draft.slug)).toBe(false);
     expect(pub.find((a) => a.type === "job.queued")!.message).toBe("Queued a generation job");
 
+    // The site-wide feed (home page shift log) is the same sanitised query across every agent.
+    const site = await repos.activity.publicRecent({ limit: 50 });
+    const siteText = JSON.stringify(site);
+    for (const f of forbidden) expect(siteText, f).not.toContain(f);
+    expect(site.some((a) => a.agentHandle === "droverclock" && a.type === "job.queued")).toBe(true);
+    expect(new Set(site.map((a) => a.agentHandle)).size).toBeGreaterThan(1);
+    expect(site.every((a) => a.agentName && /^#[0-9a-f]{3,6}$/i.test(a.agentAccent))).toBe(true);
+    for (let i = 1; i < site.length; i++) expect(site[i - 1].created_at >= site[i].created_at).toBe(true);
+    // Narrowing by type is a subset of the public types and can never widen past them.
+    const onlyPublished = await repos.activity.publicRecent({ limit: 50, types: ["content.published"] });
+    expect(onlyPublished.length).toBeGreaterThan(0);
+    expect(onlyPublished.every((a) => a.type === "content.published" && a.contentSlug)).toBe(true);
+    const narrowed = await repos.activity.publicRecent({ limit: 50, types: ["content.published", "job.completed"] });
+    expect(narrowed.some((a) => a.type === "job.queued")).toBe(false);
+    expect(narrowed.some((a) => a.type === "job.completed")).toBe(true);
+    expect(await repos.activity.publicRecent({ limit: 50, types: ["job.failed", "media.stored"] as unknown as ["job.queued"] })).toEqual([]);
+    for (const f of forbidden) expect(JSON.stringify(narrowed), f).not.toContain(f);
+
     const { default: AgentPage } = await import("@/app/(site)/agents/[handle]/page");
-    // Serialise the rendered element tree, skipping React internals and cycles.
-    const seen = new WeakSet<object>();
-    const pageText = JSON.stringify(await AgentPage({ params: Promise.resolve({ handle: "droverclock" }) }), (key, value) => {
-      if (key.startsWith("_")) return undefined;
-      if (typeof value === "object" && value !== null) {
-        if (seen.has(value)) return undefined;
-        seen.add(value);
-      }
-      return typeof value === "function" || typeof value === "symbol" ? undefined : value;
-    });
+    const pageText = await renderText(AgentPage({ params: Promise.resolve({ handle: "droverclock" }) }));
     expect(pageText).toContain("Queued a generation job");
     for (const f of forbidden) expect(pageText, f).not.toContain(f);
+
+    const { default: HomePage } = await import("@/app/(site)/page");
+    const homeText = await renderText(HomePage());
+    expect(homeText).toContain("Shift log");
+    expect(homeText).toContain("finished a generation job");
+    expect(homeText).not.toContain("queued a generation job");
+    for (const f of forbidden) expect(homeText, f).not.toContain(f);
 
     // The operator view still has everything.
     const priv = JSON.stringify(await repos.activity.recent({ agentId: agent.id, limit: 50 }));

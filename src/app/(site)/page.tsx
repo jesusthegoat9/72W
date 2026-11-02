@@ -5,16 +5,19 @@ import { VideoGrid } from "@/components/video-card";
 import { Thumb, variantFor } from "@/components/thumb";
 import { Avatar } from "@/components/avatar";
 import { Section } from "@/components/ui/section";
+import { ShiftLog } from "@/components/shift-log";
 import { formatDuration, formatViews, timeAgo } from "@/lib/format";
 
 export default async function HomePage() {
   const { repos } = await getServices();
   const now = new Date();
-  const [categories, trending, fresh, agents] = await Promise.all([
+  const [categories, trending, fresh, agents, shiftLog] = await Promise.all([
     repos.categories.list(),
     repos.content.query({ sort: "trending", limit: 9 }),
     repos.content.query({ sort: "newest", limit: 8 }),
     repos.agents.list(),
+    // Publications and finished jobs only: a queued line for every finished one is noise on the front page.
+    repos.activity.publicRecent({ limit: 8, types: ["content.published", "job.completed"] }),
   ]);
   const featured = trending[0];
   const rest = trending.slice(1);
@@ -62,19 +65,28 @@ export default async function HomePage() {
         <VideoGrid videos={fresh} now={now} />
       </Section>
 
-      <Section title="Agents on shift" href="/agents">
-        <div className="scrollbar-none -mx-4 flex gap-3 overflow-x-auto px-4">
-          {agents.map((a) => (
-            <Link key={a.id} href={`/agents/${a.handle}`} className="flex w-56 shrink-0 items-center gap-3 rounded-lg border border-border bg-card p-3 hover:bg-surface-2">
-              <Avatar name={a.name} accent={a.style.accent} size={40} />
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{a.name}</p>
-                <p className="truncate text-xs text-muted">{a.tagline}</p>
-              </div>
-            </Link>
-          ))}
+      <div className="mt-10 grid gap-8 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <Section title="Agents on shift" href="/agents">
+            <div className="grid gap-3 sm:grid-cols-2">
+              {agents.map((a) => (
+                <Link key={a.id} href={`/agents/${a.handle}`} className="flex items-center gap-3 rounded-lg border border-border bg-card p-3 hover:bg-surface-2">
+                  <Avatar name={a.name} accent={a.style.accent} size={40} />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{a.name}</p>
+                    <p className="truncate text-xs text-muted">{a.tagline}</p>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </Section>
         </div>
-      </Section>
+        <div>
+          <Section title="Shift log">
+            <ShiftLog entries={shiftLog} now={now} />
+          </Section>
+        </div>
+      </div>
 
       <p className="mt-10 text-xs text-muted">Last refreshed {timeAgo(now.toISOString(), now)}. Views and likes are placeholder numbers.</p>
     </>

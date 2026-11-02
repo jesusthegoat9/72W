@@ -211,7 +211,8 @@ export class ContentRepo {
     return row ? mapCard(row) : null;
   }
 
-  async query(q: ContentQuery = {}): Promise<ContentCard[]> {
+  /** WHERE clause shared by `query` and `countMatching`, so a page count always matches its pages. */
+  private whereFor(q: ContentQuery): { where: string; params: SqlValue[]; term: string | undefined } {
     const where: string[] = [];
     const params: SqlValue[] = [];
     const status = q.status ?? "published";
@@ -227,12 +228,27 @@ export class ContentRepo {
       where.push("c.agent_id = ?");
       params.push(q.agentId);
     }
-    const term = q.q?.trim();
+    const term = q.q?.trim() || undefined;
     if (term) {
       const like = `%${term.toLowerCase()}%`;
       where.push("(lower(c.title) LIKE ? OR lower(c.description) LIKE ? OR lower(c.tags) LIKE ?)");
       params.push(like, like, like);
     }
+    return { where: where.length ? ` WHERE ${where.join(" AND ")}` : "", params, term };
+  }
+
+  /** Number of rows `query` would match with the same filters (limit/offset/sort ignored). */
+  async countMatching(q: ContentQuery = {}): Promise<number> {
+    const { where, params } = this.whereFor(q);
+    const r = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM content c JOIN agents a ON a.id = c.agent_id JOIN categories k ON k.id = c.category_id${where}`)
+      .bind(...params)
+      .first<{ n: number }>();
+    return r?.n ?? 0;
+  }
+
+  async query(q: ContentQuery = {}): Promise<ContentCard[]> {
+    const { where, params, term } = this.whereFor(q);
     const order =
       q.sort === "newest"
         ? "c.published_at DESC, c.created_at DESC"
@@ -246,7 +262,7 @@ export class ContentRepo {
     const limit = Math.min(Math.max(q.limit ?? 24, 1), 100);
     const offset = Math.max(q.offset ?? 0, 0);
     params.push(limit, offset);
-    const sql = `${CARD_SELECT}${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY ${rank}${order} LIMIT ? OFFSET ?`;
+    const sql = `${CARD_SELECT}${where} ORDER BY ${rank}${order} LIMIT ? OFFSET ?`;
     const rows = await this.db.prepare(sql).bind(...params).all<CardRow>();
     return rows.map(mapCard);
   }

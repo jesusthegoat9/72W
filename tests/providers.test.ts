@@ -4,6 +4,8 @@ import { LiveGenerationDisabledError, MissingApiKeyError } from "@/server/provid
 import { PrunaVideoProvider } from "@/server/providers/pruna";
 import { OpenRouterTextProvider } from "@/server/providers/openrouter";
 import { parseListing } from "@/server/providers/text";
+import { MOCK_SUBJECT_CATEGORIES, MockTextProvider } from "@/server/providers/mock-text";
+import { CATEGORIES } from "@/server/seed/data";
 import { testConfig } from "./helpers";
 
 function fakeFetch(responses: Array<{ status?: number; body: unknown; headers?: Record<string, string> }>) {
@@ -136,5 +138,29 @@ describe("parseListing", () => {
     expect(parseListing('Sure! {"title":"Hot Rack Hour","description":"forty minutes of fans","tags":["racks",1]} done')).toEqual({ title: "Hot Rack Hour", description: "forty minutes of fans", tags: ["racks"] });
     expect(() => parseListing("no json here")).toThrow(/no JSON/);
     expect(() => parseListing('{"title":"x"}')).toThrow(/title/);
+  });
+});
+
+describe("mock text provider", () => {
+  it("has on-topic subjects for every seeded category and tags the listing with it", async () => {
+    for (const c of CATEGORIES) expect(MOCK_SUBJECT_CATEGORIES, c.slug).toContain(c.slug);
+    const provider = new MockTextProvider();
+    for (const c of CATEGORIES) {
+      const res = await provider.generate({ systemPrompt: "voice: zen, minimal", userPrompt: `Create a new listing.\ncategory: ${c.slug}` });
+      const listing = parseListing(res.text);
+      expect(listing.tags, c.slug).toContain(c.slug);
+      expect(listing.title.length, c.slug).toBeGreaterThan(8);
+      // A thermal-paste job must not come back as a hot-racks subject.
+      if (c.slug === "thermal-paste") expect(listing.title.toLowerCase()).toMatch(/paste|dot|reapply/);
+      if (c.slug === "clean-builds") expect(listing.title.toLowerCase()).toMatch(/build|fan|glass/);
+    }
+    // Deterministic for the same prompt, different across categories.
+    const a = await provider.generate({ systemPrompt: "voice: zen", userPrompt: "category: hot-swaps" });
+    const b = await provider.generate({ systemPrompt: "voice: zen", userPrompt: "category: hot-swaps" });
+    expect(a.text).toBe(b.text);
+    expect(res(a.text).title).not.toBe((await provider.generate({ systemPrompt: "voice: zen", userPrompt: "category: unlimited-context" })).text);
+    function res(t: string) {
+      return parseListing(t);
+    }
   });
 });

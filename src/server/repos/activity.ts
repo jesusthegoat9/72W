@@ -14,12 +14,19 @@ export interface NewActivity {
   createdAt?: string;
 }
 
+/** Event types the public feed may show; everything else is operational and stays private. */
+export const PUBLIC_ACTIVITY_TYPES = ["content.published", "job.queued", "job.completed"] as const;
+export type PublicActivityType = (typeof PUBLIC_ACTIVITY_TYPES)[number];
+
 export interface PublicActivity {
   id: string;
   type: string;
   created_at: string;
   message: string;
   contentSlug: string | null;
+  agentHandle: string;
+  agentName: string;
+  agentAccent: string;
 }
 
 export function publicActivityMessage(type: string, contentTitle: string | null): string {
@@ -102,24 +109,61 @@ export class ActivityRepo {
    * Failures, retries, drafts, media keys and error text never appear here;
    * messages are regenerated from the type, not read from the row.
    */
-  async publicRecent(opts: { agentId: string; limit?: number }): Promise<PublicActivity[]> {
+  /**
+   * The sanitised feed shown on the site: publications of still-published
+   * content plus bare "queued / finished a job" lines, regenerated from the
+   * event type so no stored message, draft title, media key or error text can
+   * leak. Across all agents when `agentId` is omitted (the home page shift
+   * log), or one agent's own lines. `types` narrows to a subset of the public
+   * types; it can never widen past them.
+   */
+  async publicRecent(opts: { agentId?: string; limit?: number; types?: readonly PublicActivityType[] } = {}): Promise<PublicActivity[]> {
+    const params: SqlValue[] = [];
+    let scope = "";
+    if (opts.agentId) {
+      scope = "a.agent_id = ? AND ";
+      params.push(opts.agentId);
+    }
+    const types = (opts.types ?? PUBLIC_ACTIVITY_TYPES).filter((t) => (PUBLIC_ACTIVITY_TYPES as readonly string[]).includes(t));
+    if (types.length === 0) return [];
+    const jobTypes = types.filter((t) => t !== "content.published");
+    const clauses: string[] = [];
+    if (types.includes("content.published")) clauses.push("(a.type = 'content.published' AND c.status = 'published')");
+    if (jobTypes.length) {
+      clauses.push(`a.type IN (${jobTypes.map(() => "?").join(", ")})`);
+      params.push(...jobTypes);
+    }
+    params.push(Math.min(opts.limit ?? 10, 50));
     const rows = await this.db
       .prepare(
-        `SELECT a.id, a.type, a.created_at, c.title AS content_title, c.slug AS content_slug
+        `SELECT a.id, a.type, a.created_at, g.handle AS agent_handle, g.name AS agent_name, g.style AS agent_style,
+                c.title AS content_title, c.slug AS content_slug
          FROM activity_log a
+         JOIN agents g ON g.id = a.agent_id
          LEFT JOIN content c ON c.id = a.content_id
-         WHERE a.agent_id = ?
-           AND ((a.type = 'content.published' AND c.status = 'published') OR a.type IN ('job.queued', 'job.completed'))
-         ORDER BY a.created_at DESC LIMIT ?`,
+         WHERE ${scope}(${clauses.join(" OR ")})
+         ORDER BY a.created_at DESC, (a.type = 'content.published') DESC, a.id DESC LIMIT ?`,
       )
-      .bind(opts.agentId, Math.min(opts.limit ?? 10, 50))
-      .all<{ id: string; type: string; created_at: string; content_title: string | null; content_slug: string | null }>();
+      .bind(...params)
+      .all<{
+        id: string;
+        type: string;
+        created_at: string;
+        agent_handle: string;
+        agent_name: string;
+        agent_style: string;
+        content_title: string | null;
+        content_slug: string | null;
+      }>();
     return rows.map((r) => ({
       id: r.id,
       type: r.type,
       created_at: r.created_at,
       message: publicActivityMessage(r.type, r.content_title),
       contentSlug: r.type === "content.published" ? r.content_slug : null,
+      agentHandle: r.agent_handle,
+      agentName: r.agent_name,
+      agentAccent: (JSON.parse(r.agent_style) as { accent?: string }).accent ?? "#7cf",
     }));
   }
 

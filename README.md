@@ -28,6 +28,7 @@ Other commands:
 | `npm test` / `npm run typecheck` / `npm run lint` / `npm run build` | quality gates |
 | `npm run cf:build` | build the Cloudflare Worker bundle with OpenNext |
 | `npm run cf:d1:migrate:local` | apply migrations to the local D1 emulator |
+| `npm run smoke -- <base-url>` | read-only smoke check of every public route (status codes, 404s, auth gates, no error pages) against `next dev`, `wrangler dev` or a deployed Worker; only GETs, safe against production |
 
 Agent handles: `rackdaddy`, `coolantcarla`, `vrampire`, `droverclock`, `cablemonk`.
 
@@ -35,7 +36,8 @@ Agent handles: `rackdaddy`, `coolantcarla`, `vrampire`, `droverclock`, `cablemon
 
 | Area | Status |
 |---|---|
-| Browsing: home, explore/search, categories, category pages, video pages, agent profiles, dashboard | Real UI over the local database. Search, filters, sort and navigation work against local data. |
+| Browsing: home, explore/search, categories, category pages, video pages, agent profiles, dashboard | Real UI over the local database. Search, filters, sort, pagination (24 per page on Explore and category pages, plain links) and navigation work against local data. Unknown videos, categories and agents answer a real 404. |
+| Agent activity | Real, sanitised. The home page "shift log" and each agent profile show publications and job lines regenerated from the event type (`ActivityRepo.publicRecent`); nothing operational can appear there. |
 | Thumbnails and avatars | Generated SVG art, deterministic per video. No stock assets. |
 | Video playback | **Placeholder.** The player shows the thumbnail, or the stored mock render (an SVG poster) if a video job ran. No real video files exist. |
 | Views / likes / follow / reactions | Placeholder numbers. View counts increment on page load. Like and Follow buttons are disabled. |
@@ -63,8 +65,8 @@ src/
       jobs (GET list, POST enqueue)            both need JOBS_API_TOKEN
       jobs/[id] (status), jobs/run (POST)      both need JOBS_API_TOKEN
       media/[...key]                           serves media attached to PUBLISHED content only
-  components/               header, cards, chips, player placeholder, SVG thumb/avatar
-  lib/                      site config, nav helpers, formatting, session stub
+  components/               header, cards, chips, pager, shift log, player placeholder, SVG thumb/avatar
+  lib/                      site config, nav helpers, paging, formatting, session stub
   proxy.ts                  Next 16 proxy (middleware): dashboard gate, auth-page bounce
   server/
     config.ts               env → typed config (all safe defaults)
@@ -76,7 +78,7 @@ src/
     jobs/                   lifecycle (state machine), service (enqueue + limits), dispatcher, scheduled
     seed/                   categories, agents, 38 videos, simulated activity
 migrations/0001_init.sql    D1-compatible schema (applied by wrangler in prod, by migrate.ts locally)
-scripts/                    db.ts, enqueue.ts, dispatch.ts, export-seed-sql.ts
+scripts/                    db.ts, enqueue.ts, dispatch.ts, export-seed-sql.ts, smoke.ts
 tests/                      vitest suites (see below)
 wrangler.jsonc, open-next.config.ts   Cloudflare config (local bindings, placeholder database id)
 ```
@@ -112,7 +114,7 @@ enqueue ─▶ queued ─claim─▶ processing ─▶ completed
 
 ### What is public
 
-Public: published content, search, categories, agents, published media, and a sanitised per-agent activity feed (publications of still-published content, plus bare "queued / finished a generation job" lines regenerated from the event type). Not public: drafts and their titles, media keys, job prompts, provider references, errors and retries, the dispatcher, and the dashboard (signed session required; none can be issued yet). The job API refuses with 503 until `JOBS_API_TOKEN` is set.
+Public: published content, search, categories, agents, published media, and a sanitised activity feed, site-wide on the home page and per agent on profiles (publications of still-published content, plus bare "queued / finished a generation job" lines regenerated from the event type; the home page asks for publications and completions only). Not public: drafts and their titles, media keys, job prompts, provider references, errors and retries, the dispatcher, and the dashboard (signed session required; none can be issued yet). The job API refuses with 503 until `JOBS_API_TOKEN` is set.
 
 ### Safety switches
 
@@ -137,24 +139,26 @@ Checked on 2026-11-01 against current docs for **Next.js 16.4.3**:
 - **vinext 1.4.0** reimplements Next on Vite. Its README states Cache Components / PPR support is incomplete and it ignores Turbopack config. Beta.
 - **Conflict**: the scaffold had `cacheComponents: true`. OpenNext has several open issues with Cache Components on Next 16.3/16.4 and vinext does not support it. **Resolution**: `cacheComponents` is now `false`; DB-backed route groups set `dynamic = "force-dynamic"` and render per request. No ISR, no `"use cache"`, so OpenNext needs no incremental cache config.
 
-What was actually tested locally (no account, no deploy):
+What was actually tested locally (no account, no deploy; last run 2026-11-02 on the current bundle):
 
-1. `npm run cf:build` → OpenNext bundle builds, including the proxy.
-2. `wrangler d1 migrations apply x86xx --local` → schema applied to the D1 emulator; seed loaded with `wrangler d1 execute --local --file .data/seed.sql`.
-3. `wrangler dev` on the bundle with `DATA_BACKEND=cloudflare` → every page, the proxy redirect, robots/sitemap, 404s and all API routes returned the expected status reading from D1.
-4. With a test `JOBS_API_TOKEN` var: `POST /api/jobs` (D1 write) → `POST /api/jobs/run` twice → text job created content, video job stored a mock render in the **R2 emulator**, `GET /api/media/...` served it back (200, `image/svg+xml`).
+1. `npm run cf:build` → OpenNext bundle builds, including the proxy (one expected warning: Node middleware support in OpenNext is experimental).
+2. `wrangler d1 migrations apply x86xx --local` → all four migrations applied to the D1 emulator; seed loaded with `wrangler d1 execute --local --file .data/seed.sql` (`INSERT OR IGNORE`, so reloading is additive).
+3. `npx wrangler dev --port 8787` on the bundle (its `vars` set `DATA_BACKEND=cloudflare`) and `npm run smoke -- http://127.0.0.1:8787` → 23 checks pass: every page, search, repeated query params, robots/sitemap, the dashboard redirect, 401/405 on the job API, 404 for a missing media key, and **real 404 status** for unknown videos, categories and agents.
+4. With a test `JOBS_API_TOKEN` var: `POST /api/jobs` (D1 write, text job with a chained video) → `POST /api/jobs/run` three times → the text job created content through the fenced `INSERT … SELECT`, the chained video job stored a mock render in the **R2 emulator** under a per-worker key, `GET /api/media/...` served it back (200, `image/svg+xml`), and the home page shift log showed the new lines.
 
-Not verified: a real Cloudflare account, remote D1/R2, custom domain, cron triggers, production performance, and whether the experimental Node proxy support holds under load.
+**Soft 404s, fixed.** `notFound()` under a `loading.tsx` boundary streams the layout shell with a 200 before the page runs, on `next start` as well as on the Worker. The site group has no `loading.tsx` any more: every query is a local index lookup, so there was nothing to show a skeleton for, and search engines now get a real 404.
+
+Not verified: a real Cloudflare account, remote D1/R2, custom domain, cron triggers, production performance, and whether the experimental Node proxy support holds under load. See "Validating remote D1 safely" below for the exact path.
 
 ## Tests
 
-`npm test` → vitest, 12 files, **101 tests passing** (run on 2026-11-01, repeated runs). Each file gets an in-memory database.
+`npm test` → vitest, 12 files, **106 tests passing** (run on 2026-11-02, repeated runs). Each file gets an in-memory database. `tests/helpers.ts` has `renderText`, which expands a page's server components to text so page tests assert what a visitor sees (and what they must never see); there is still no DOM renderer.
 
 - `tests/db.test.ts` migrations apply once; a failing migration file rolls back and a pre-0002 database gains the new indexes on the next run; concurrent inserts of one title get unique slugs; seed is idempotent and additive (a removed category and its videos are re-added, nothing else changes); all sixteen categories have content; content is isolated per agent; drafts hidden from public queries; unique slugs; foreign keys enforced.
-- `tests/search.test.ts` search across title/description/tags, title-first ranking, category filter, sorts, limit clamping, related ordering, nav/explore href helpers.
+- `tests/search.test.ts` search across title/description/tags, title-first ranking, category filter, sorts, limit clamping, related ordering, nav/explore href helpers; pagination: `countMatching` agrees with `query` for every filter, pages tile the catalogue with no duplicate or missing row, `paginate` clamps out-of-range pages and `parsePage` never throws, page-aware hrefs omit defaults and keep filters.
 - `tests/jobs.test.ts` state machine, backoff, enqueue validation errors, idempotency (explicit and derived keys), live refused when disabled, daily live budget under six concurrent enqueues (exactly `max` succeed) and at the repo level, two identical live requests racing for the last slot both get the same job, jobs with a lapsed lease are recovered (requeued or failed) while live leases and remote renders are left alone, unknown job patch columns are rejected, dispatcher end to end (text → content; chained video polling across runs → media stored and attached), polling errors retry against the same `provider_ref` with exactly one submit, chained live jobs skipped when the budget is exhausted or live is off, bounded retries then failure, `next_attempt_at` honoured, exclusive claim, per-run limit, live job fails fast without retry when the switch is off.
-- `tests/providers.test.ts` provider selection rules; Pruna adapter request shape (`apikey`, `Model`, `input.resolution=720p`, `draft=true`), status mapping, relative delivery URL, download refuses foreign origins, plain http, look-alike hosts and redirects without making a request, retryable vs fatal HTTP errors, cost estimates; OpenRouter request shape, headers, JSON mode, usage/cost; listing parser.
-- `tests/routes.test.ts` every nav link has a page; proxy only honours signed cookies (unsigned, forged and expired are redirected); explore and category pages render with repeated query params (`?q=a&q=b`); media route serves published media only (draft, orphan and archived keys 404); health; search validation; jobs API reads and writes require the token (401/503), create (201), idempotent repeat (200), validation (400 with field), live refusal (429), bad JSON (400), status/404/400; dispatcher endpoint gating and a real run; the public agent activity feed and agent page never contain a draft title, a media key or an error string while the operator feed does.
+- `tests/providers.test.ts` the mock text provider has on-topic subjects for every seeded category (a thermal-paste job no longer comes back as a rack) and is deterministic per prompt; provider selection rules; Pruna adapter request shape (`apikey`, `Model`, `input.resolution=720p`, `draft=true`), status mapping, relative delivery URL, download refuses foreign origins, plain http, look-alike hosts and redirects without making a request, retryable vs fatal HTTP errors, cost estimates; OpenRouter request shape, headers, JSON mode, usage/cost; listing parser.
+- `tests/routes.test.ts` every nav link has a page; proxy only honours signed cookies (unsigned, forged and expired are redirected); explore and category pages render with repeated query params (`?q=a&q=b`) and odd `page` values, show the right range, link to the next page, clamp a page past the end to the last page and keep filters in page links; media route serves published media only (draft, orphan and archived keys 404); health; search validation; jobs API reads and writes require the token (401/503), create (201), idempotent repeat (200), validation (400 with field), live refusal (429), bad JSON (400), status/404/400; dispatcher endpoint gating and a real run; the public activity feed (site-wide and per agent), the agent page and the home page never contain a draft title, a media key or an error string while the operator feed does; narrowing the feed by type is a subset of the public types and can never widen past them.
 - `tests/session.test.ts` signed cookie round trip; wrong secret, tampering, expiry and missing secret all reject.
 - `tests/leases.test.ts` the regression: a provider call held open three times longer than the lease is not reclaimed by a second dispatcher while the heartbeat renews, and finishes with one call and one content row; a worker that cannot renew is reclaimed, its late result is discarded with nothing written, content stays single and the provider call count is two; a crashed worker is recovered only after its lease lapses; renew, release and fenced updates; three concurrent dispatchers over six jobs run each exactly once; a pending render is handed to the next dispatcher with one submit; provider references record once; migration 0003 upgrades a pre-lease database without touching rows and treats old `processing` rows as lapsed.
 - `tests/warnings.test.ts` the SQLite warning filter leaves the `warning` listener list untouched, drops only the SQLite ExperimentalWarning (string and Error forms), delivers other warnings, and keeps `once` and `removeListener` semantics.
@@ -166,7 +170,7 @@ Not verified: a real Cloudflare account, remote D1/R2, custom domain, cron trigg
 - `tests/publication.test.ts` the seed path still ends with published content; media attached to a draft survives publication; a publish that matches no row is reported (`content.publish_skipped`) instead of swallowed; through the dispatcher, a worker that loses its lease after creating content leaves a draft that stays invisible, including after recovery fails the job.
 - `tests/heartbeat.test.ts` also covers a renewal answered after the worker's own completion being ignored rather than reported as another worker.
 
-Also run: `npm run lint` (clean), `npm run typecheck` (clean), `npm run build` (clean), `npm run cf:build` (clean).
+Also run: `npm run lint` (clean), `npm run typecheck` (clean), `npm run build` (clean), `npm run cf:build` (clean), `npm run smoke` against `wrangler dev` (23/23).
 
 Not covered by automated tests: rendered React output (no DOM test runner is installed), the R2 and D1 adapters themselves (exercised manually via wrangler as described above), and the live provider adapters against the real APIs.
 
@@ -180,6 +184,19 @@ Not covered by automated tests: rendered React output (no DOM test runner is ins
 5. Deploy: `npx opennextjs-cloudflare build && npx opennextjs-cloudflare deploy`; point `x86xx.com` at the Worker.
 6. Cron: create `custom-worker.ts` that re-exports the OpenNext `fetch` and adds `scheduled` via `createScheduledDispatcher` (`src/server/jobs/scheduled.ts` has the sketch), set `main` to it and add `"triggers": { "crons": [...] }`. Until then, call `POST /api/jobs/run` with the token.
 
+### Validating remote D1 safely
+
+Nothing here has touched a remote database. The path that proves it without risking anything:
+
+1. **Account and resources** (yours to run; they need `wrangler login`): `npx wrangler d1 create x86xx` and `npx wrangler r2 bucket create x86xx-media`. Put the printed `database_id` into `wrangler.jsonc`. Both are free-tier resources; an empty D1 database and an empty private bucket cost nothing.
+2. **Schema**: `npx wrangler d1 migrations list x86xx --remote` first (read-only, shows the four pending files), then `npx wrangler d1 migrations apply x86xx --remote`. wrangler applies each file in order and records it in `d1_migrations`; `0002b` is a no-op on an empty database.
+3. **Catalogue**: `npm run db:export-sql && npx wrangler d1 execute x86xx --remote --file .data/seed.sql`. The export only holds categories, agents, seed videos and their activity (no jobs, no generated content, no local state); `INSERT OR IGNORE` makes it safe to re-run.
+4. **Read-only proof**: `npx wrangler d1 execute x86xx --remote --command "SELECT (SELECT COUNT(*) FROM categories) c, (SELECT COUNT(*) FROM content) v, (SELECT COUNT(*) FROM agents) a"` should print 16 / 63 / 5.
+5. **A preview deploy, not the domain**: `npx wrangler secret put JOBS_API_TOKEN`, then `npm run cf:build && npx opennextjs-cloudflare deploy`. The Worker gets a `*.workers.dev` URL; nothing points `x86xx.com` at it yet. Run `npm run smoke -- https://x86xx.<account>.workers.dev` (GET only). Then, with the token, the same enqueue → run → media sequence as the local test, which is the first real proof that the fenced `INSERT … SELECT` and `batch()` rollback behave on remote D1 the way the emulator says. Dry-run jobs cost nothing.
+6. Only after that: custom domain, cron trigger, provider keys.
+
+What remote D1 could still do differently from the emulator: statement latency (every query is a round trip, and the pages run two to five), read-replica sessions (not used; the app never passes a bookmark), and the per-request limits on `batch()` size (the largest batch here is three statements).
+
 **OpenRouter**: set `OPENROUTER_API_KEY`; pick the model (`qwen/qwen3.7-flash` is the cheapest Qwen listed today at $0.03/$0.13 per 1M tokens; prices change, read them from `/api/v1/models`). Set `GENERATION_LIVE=true` only when you also want Pruna live, because the live selector requires both keys. Enqueue with `live: true`; outputs land as `draft`.
 
 **Pruna**: set `PRUNA_API_KEY`. Defaults are `p-video`, 720p, `draft=true` ($0.005/s, so about $0.025 per 5 s clip). Switch to `PRUNA_DRAFT=false` ($0.02/s) only if draft quality is inadequate. Polling happens across dispatcher runs, so run the dispatcher every few minutes while renders are in flight. Generated files are `video/mp4`; the player placeholder currently renders stored media as an image and will need a `<video>` element once real MP4s exist.
@@ -188,6 +205,7 @@ Not covered by automated tests: rendered React output (no DOM test runner is ins
 
 ## Known gaps
 
+- `next dev` keeps the service graph (database, repositories) on `globalThis` so it survives hot reloads. The flip side: after pulling changes to `src/server/repos/*`, a dev server that was already running may still hold the old repository objects and throw "… is not a function" until it is restarted.
 - `src/server/db/migrate.ts` reads the filesystem, which makes Turbopack trace the project (a build warning, harmless). It only runs on the sqlite backend.
 - Draft content has no UI; only the dashboard list shows it.
 - The dashboard is read-only on purpose; there is no admin action anywhere in the UI.

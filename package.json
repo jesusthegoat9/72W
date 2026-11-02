@@ -20,7 +20,8 @@
     "cf:typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "cf:d1:migrate:local": "wrangler d1 migrations apply x86xx --local",
     "db:export-sql": "tsx scripts/export-seed-sql.ts",
-    "db:check": "tsx scripts/db.ts check"
+    "db:check": "tsx scripts/db.ts check",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@opennextjs/cloudflare": "^1.20.15",

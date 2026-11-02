@@ -61,7 +61,18 @@ const SUBJECTS: Record<string, string[]> = {
   overclocked: ["6.1GHz On A Frosted Pot", "A Voltage Curve With No Fear", "Timings Tightened Past Reason"],
   "full-load": ["Eight Accelerators At 100%", "Fans With The Curve Removed", "A 72-Hour Training Run"],
   "data-center-after-dark": ["Blinkenlights After Midnight", "The Night Shift At An Empty NOC", "Eleven Hours Of Server Hum"],
+  "fresh-out-the-box": ["A 2U Chassis Still Cold From The Truck", "First POST With The Plastic Still On", "A Pallet Of Blades Meeting Their First Fan Spin"],
+  "hardcore-processing": ["All Cores Pinned Until The VRMs Sweat", "An AVX-512 Loop With No Thermal Headroom", "Sixty-Four Threads And Not One Idle"],
+  "group-compute": ["An NCCL All-Reduce Across Eight Nodes", "A Full Rack Sharing One Training Job", "Four Thousand GPUs And Nobody Waits Their Turn"],
+  "hot-swaps": ["A Drive Pulled Live With No Downtime", "A PSU Swap Under Full Load", "Fans Replaced While The Rack Keeps Running"],
+  "thermal-paste": ["A Pea-Sized Dot Pressed Firmly", "Thermal Paste Spread Edge To Edge", "A Reapply That Dropped Ten Degrees"],
+  "unlimited-context": ["A KV Cache With Its Own Rack", "One Million Tokens And Still Attending", "A Context Window That Never Truncates"],
+  "no-rate-limits": ["Tokens Per Second With The Governor Removed", "A Queue That Never Says 429", "Throughput With Nobody Throttling"],
+  "clean-builds": ["A Build Without A Fingerprint On The Glass", "Every Fan Aligned, Every Cable Routed", "A Tempered Glass Panel And Zero Dust"],
 };
+
+/** Category slugs the mock provider has on-topic subjects for; anything else falls back to hot-racks. */
+export const MOCK_SUBJECT_CATEGORIES: readonly string[] = Object.keys(SUBJECTS);
 const HOOKS = ["Full Load", "Barely Specced", "Fresh Out Of The Crate", "After Hours", "No Throttle", "Maxed Out", "Sustained Boost"];
 const PAYOFFS = [
   "runs hotter than the spec sheet admits and never once backs down.",

@@ -55,22 +55,3 @@ export function EmptyState({ title, body, action }: { title: string; body: strin
     </div>
   );
 }
-
-export function VideoGridSkeleton({ count = 8 }: { count?: number }) {
-  return (
-    <div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4" aria-busy="true" aria-label="Loading">
-      {Array.from({ length: count }, (_, i) => (
-        <div key={i} className="flex animate-pulse flex-col gap-2">
-          <div className="aspect-video rounded-lg bg-surface-2" />
-          <div className="flex gap-2.5">
-            <div className="h-[30px] w-[30px] rounded-full bg-surface-2" />
-            <div className="flex-1 space-y-2">
-              <div className="h-3.5 w-11/12 rounded bg-surface-2" />
-              <div className="h-3 w-1/2 rounded bg-surface-2" />
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
