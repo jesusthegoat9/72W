@@ -65,7 +65,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxLiveJobsPerDay: num(env.GENERATION_MAX_LIVE_PER_DAY, 10),
     maxAttempts: num(env.GENERATION_MAX_ATTEMPTS, 3),
     retryBackoffSeconds: num(env.GENERATION_RETRY_BACKOFF_SECONDS, 60),
-    leaseSeconds: Math.max(1, num(env.GENERATION_LEASE_SECONDS, 60)),
+    // 1s .. 24h: timers above 2^31-1 ms are clamped to 1 ms by Node, which would make every renewal time out.
+    leaseSeconds: Math.min(Math.max(1, num(env.GENERATION_LEASE_SECONDS, 60)), 24 * 3600),
     jobsApiToken: env.JOBS_API_TOKEN || null,
     openrouter: {
       apiKey: env.OPENROUTER_API_KEY || null,

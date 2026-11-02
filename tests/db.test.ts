@@ -7,7 +7,7 @@ describe("migrations", () => {
   it("apply once and are recorded", async () => {
     const db = new SqliteDatabase(":memory:");
     const first = await migrate(db);
-    expect(first).toEqual(["0001_init.sql", "0002_indexes.sql", "0003_leases.sql"]);
+    expect(first).toEqual(["0001_init.sql", "0002_indexes.sql", "0002b_reconcile_content_jobs.sql", "0003_leases.sql"]);
     const second = await migrate(db);
     expect(second).toEqual([]);
     const tables = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all<{ name: string }>();
@@ -33,9 +33,39 @@ describe("migrations", () => {
     // A database created before 0002 existed picks it up on the next run.
     const indexes = (await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all<{ name: string }>()).map((i) => i.name);
     expect(indexes).not.toContain("idx_content_media_key");
-    expect(await migrate(db)).toEqual(["0002_indexes.sql", "0003_leases.sql"]);
+    expect(await migrate(db)).toEqual(["0002_indexes.sql", "0002b_reconcile_content_jobs.sql", "0003_leases.sql"]);
     const after = (await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all<{ name: string }>()).map((i) => i.name);
     expect(after).toEqual(expect.arrayContaining(["idx_content_media_key", "idx_activity_job", "idx_activity_content", "idx_jobs_processing"]));
+  });
+});
+
+describe("pending migrations", () => {
+  it("is read-only: reports every file on an empty database without creating tables", async () => {
+    const db = new SqliteDatabase(":memory:");
+    const { pendingMigrations } = await import("@/server/db/migrate");
+    expect(await pendingMigrations(db)).toEqual(["0001_init.sql", "0002_indexes.sql", "0002b_reconcile_content_jobs.sql", "0003_leases.sql"]);
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'").first<{ n: number }>()).toEqual({ n: 0 });
+    await migrate(db);
+    expect(await pendingMigrations(db)).toEqual([]);
+  });
+});
+
+describe("sqlite batch on the shared connection", () => {
+  it("runs each batch as one transaction without interleaving concurrent callers", async () => {
+    const db = new SqliteDatabase(":memory:");
+    await db.exec("CREATE TABLE t (k TEXT PRIMARY KEY, v INTEGER NOT NULL)");
+    const batch = (k: string) => db.batch([db.prepare("INSERT INTO t (k, v) VALUES (?, 0)").bind(k), db.prepare("UPDATE t SET v = v + 1 WHERE k = ?").bind(k)]);
+    // Before the fix this raised "cannot start a transaction within a transaction" for the second caller.
+    const results = await Promise.all([batch("a"), batch("b"), batch("c")]);
+    expect(results).toEqual([[{ changes: 1 }, { changes: 1 }], [{ changes: 1 }, { changes: 1 }], [{ changes: 1 }, { changes: 1 }]]);
+    expect(await db.prepare("SELECT k, v FROM t ORDER BY k").all()).toEqual([{ k: "a", v: 1 }, { k: "b", v: 1 }, { k: "c", v: 1 }]);
+    // A failing statement rolls the whole batch back and reports the error.
+    await expect(db.batch([db.prepare("INSERT INTO t (k, v) VALUES ('d', 0)"), db.prepare("INSERT INTO nope VALUES (1)")])).rejects.toThrow(/no such table/);
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM t WHERE k = 'd'").first<{ n: number }>()).toEqual({ n: 0 });
+    // A zero-row statement is not a failure; the caller sees changes: 0.
+    expect(await db.batch([db.prepare("UPDATE t SET v = 9 WHERE k = 'zzz'")])).toEqual([{ changes: 0 }]);
+    // Statements from another adapter are refused rather than silently run outside the transaction.
+    await expect(db.batch([{ bind: () => ({}) as never, first: async () => null, all: async () => [], run: async () => ({ changes: 1 }) }])).rejects.toThrow(/must come from this adapter/);
   });
 });
 

@@ -167,7 +167,7 @@ describe("dispatcher", () => {
     video = (await repos.jobs.getById(video.id))!;
     expect(video.status).toBe("completed");
     const content = (await repos.content.getById(video.content_id!))!;
-    expect(content.media_key).toBe(`videos/${content.id}.svg`);
+    expect(content.media_key).toMatch(new RegExp(`^videos/${content.id}\\.a1-w_[a-z0-9]+\\.svg$`)); // keyed per attempt and worker
     const stored = await d.media.head(content.media_key!);
     expect(stored?.contentType).toBe("image/svg+xml");
     expect(video.result).toMatchObject({ mediaKey: content.media_key, simulated: true, draft: true, resolution: "720p" });
@@ -292,6 +292,18 @@ describe("dispatcher", () => {
     const svc = new JobService(repos, testConfig());
     const { job } = await svc.enqueue({ agentHandle: "rackdaddy", kind: "text" });
     await expect(repos.jobs.update(job.id, { idempotency_key: "x" } as never)).rejects.toThrow(/not updatable/);
+  });
+
+  it("a configuration error on the polling path fails fast too, without a retry", async () => {
+    const { repos } = await freshRepos();
+    const agent = (await repos.agents.getByHandle("rackdaddy"))!;
+    // A live render in flight, polled while live generation is switched off.
+    const { job } = await repos.jobs.insert({ agentId: agent.id, kind: "video", idempotencyKey: "live-poll", prompt: "p", provider: "pruna", dryRun: false });
+    await repos.jobs.claim(job.id, { owner: "gone", now: "2026-01-01T00:00:00.000Z", until: "2026-01-01T00:01:00.000Z" });
+    await repos.jobs.update(job.id, { provider_ref: "pred_live" });
+    const r = await runDispatcher(deps(repos, { liveGenerationEnabled: false }));
+    expect(r).toMatchObject({ claimed: 0, failed: 1, retried: 0 });
+    expect((await repos.jobs.getById(job.id))!).toMatchObject({ status: "failed", attempts: 1, last_error: expect.stringMatching(/Live generation is disabled/) });
   });
 
   it("does not run a job before its next_attempt_at", async () => {

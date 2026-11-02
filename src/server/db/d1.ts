@@ -7,7 +7,7 @@ import type { SqlDatabase, SqlStatement, SqlValue, Row } from "./database";
 export interface D1Like {
   prepare(sql: string): D1StatementLike;
   exec(sql: string): Promise<unknown>;
-  batch(statements: D1StatementLike[]): Promise<unknown>;
+  batch(statements: D1StatementLike[]): Promise<{ meta: { changes: number } }[]>;
 }
 export interface D1StatementLike {
   bind(...values: unknown[]): D1StatementLike;
@@ -26,8 +26,9 @@ export class D1Database implements SqlDatabase {
   async exec(sql: string): Promise<void> {
     await this.d1.exec(sql);
   }
-  async batch(statements: SqlStatement[]): Promise<void> {
-    await this.d1.batch(statements.map((s) => (s as D1Statement).inner));
+  async batch(statements: SqlStatement[]): Promise<{ changes: number }[]> {
+    const results = await this.d1.batch(statements.map((s) => (s as D1Statement).inner));
+    return results.map((r) => ({ changes: r.meta.changes }));
   }
 }
 

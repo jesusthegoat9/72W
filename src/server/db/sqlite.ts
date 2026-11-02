@@ -5,9 +5,10 @@ import type { SqlDatabase, SqlStatement, SqlValue, Row } from "./database";
 export class SqliteDatabase implements SqlDatabase {
   readonly raw: DatabaseSync;
 
-  constructor(path = ":memory:") {
-    this.raw = new DatabaseSync(path);
-    this.raw.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+  constructor(path = ":memory:", opts: { readOnly?: boolean } = {}) {
+    this.raw = new DatabaseSync(path, { readOnly: opts.readOnly === true });
+    this.raw.exec("PRAGMA foreign_keys = ON;");
+    if (!opts.readOnly) this.raw.exec("PRAGMA journal_mode = WAL;");
   }
 
   prepare(sql: string): SqlStatement {
@@ -18,15 +19,27 @@ export class SqliteDatabase implements SqlDatabase {
     this.raw.exec(sql);
   }
 
-  async batch(statements: SqlStatement[]): Promise<void> {
+  /**
+   * Runs the batch inside one transaction WITHOUT yielding to the event loop:
+   * every caller in this process shares this single connection, so awaiting
+   * between statements would let another caller's statement run inside (or
+   * collide with) the open transaction. node:sqlite is synchronous, which is
+   * what makes this safe.
+   */
+  async batch(statements: SqlStatement[]): Promise<{ changes: number }[]> {
+    const results: { changes: number }[] = [];
     this.raw.exec("BEGIN");
     try {
-      for (const s of statements) await s.run();
+      for (const s of statements) {
+        if (!(s instanceof SqliteStatement)) throw new Error("SqliteDatabase.batch: statements must come from this adapter");
+        results.push(s.runSync());
+      }
       this.raw.exec("COMMIT");
     } catch (err) {
       this.raw.exec("ROLLBACK");
       throw err;
     }
+    return results;
   }
 
   close() {
@@ -55,6 +68,10 @@ class SqliteStatement implements SqlStatement {
   }
 
   async run(): Promise<{ changes: number }> {
+    return this.runSync();
+  }
+
+  runSync(): { changes: number } {
     const r = this.db.prepare(this.sql).run(...this.values);
     return { changes: Number(r.changes) };
   }

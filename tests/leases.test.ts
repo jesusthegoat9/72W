@@ -204,7 +204,7 @@ describe("migration 0003 on an existing database", () => {
     const contentBefore = await pre.content.count("any");
     const jobsBefore = await db.prepare("SELECT COUNT(*) AS n FROM generation_jobs").first<{ n: number }>();
 
-    expect(await migrate(db)).toEqual(["0003_leases.sql"]);
+    expect(await migrate(db)).toEqual(["0002b_reconcile_content_jobs.sql", "0003_leases.sql"]);
     const cols = (await db.prepare("PRAGMA table_info(generation_jobs)").all<{ name: string }>()).map((c) => c.name);
     expect(cols).toEqual(expect.arrayContaining(["lease_owner", "lease_expires_at"]));
     expect(await pre.content.count("any")).toBe(contentBefore);

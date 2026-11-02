@@ -18,6 +18,11 @@ export interface SqlDatabase {
   prepare(sql: string): SqlStatement;
   /** Run one or more statements with no result (DDL, migrations). */
   exec(sql: string): Promise<void>;
-  /** Run statements sequentially in one transaction where supported. */
-  batch(statements: SqlStatement[]): Promise<void>;
+  /**
+   * Runs statements sequentially in ONE transaction (BEGIN/COMMIT locally,
+   * D1 batch() in production) and reports each statement's row count. A
+   * failing statement rolls back the whole batch. A statement that matches
+   * zero rows is not a failure, so callers check `changes` themselves.
+   */
+  batch(statements: SqlStatement[]): Promise<{ changes: number }[]>;
 }

@@ -1,6 +1,10 @@
-import type { SqlDatabase, SqlValue } from "../db/database";
+import type { SqlDatabase, SqlStatement, SqlValue } from "../db/database";
 import { newId, nowIso } from "../db/ids";
 import type { Job, JobKind, JobParams, JobRow, JobStatus, ProviderName } from "../db/types";
+import { LEASE_FENCE_SQL, LeaseLostError, leaseFenceParams, type LeaseFence } from "./lease";
+
+export { LeaseLostError };
+export type { LeaseFence };
 
 export interface NewJob {
   agentId: string;
@@ -27,11 +31,11 @@ export interface LiveBudget {
   max: number;
 }
 
-export class LeaseLostError extends Error {
-  constructor(readonly jobId: string, readonly owner: string) {
-    super(`job ${jobId}: lease no longer held by ${owner}`);
-    this.name = "LeaseLostError";
-  }
+export interface InsertOptions {
+  /** Live jobs only: atomic daily budget. */
+  liveBudget?: LiveBudget;
+  /** Chained jobs: only insert while the parent job's lease is still held. */
+  fence?: LeaseFence;
 }
 
 export interface Lease {
@@ -91,7 +95,10 @@ export class JobsRepo {
    * A race on the idempotency key is resolved by the UNIQUE constraint and a
    * re-read, never by a duplicate row.
    */
-  async insert(input: NewJob, liveBudget?: LiveBudget): Promise<{ job: Job; created: boolean }> {
+  async insert(input: NewJob, opts?: LiveBudget | InsertOptions): Promise<{ job: Job; created: boolean }> {
+    const options: InsertOptions = opts && "since" in opts ? { liveBudget: opts } : (opts ?? {});
+    const liveBudget = options.liveBudget;
+    const fence = options.fence;
     const existing = await this.getByIdempotencyKey(input.idempotencyKey);
     if (existing) return { job: existing, created: false };
     const id = newId("job");
@@ -110,13 +117,21 @@ export class JobsRepo {
       ts,
     ];
     const columns = `(id, agent_id, kind, status, idempotency_key, prompt, params, provider, dry_run, attempts, max_attempts, created_at, updated_at)`;
-    const guarded = !input.dryRun && liveBudget;
-    const sql = guarded
+    const guarded = !input.dryRun && liveBudget ? liveBudget : null;
+    const conditions: string[] = [];
+    if (guarded) {
+      conditions.push("(SELECT COUNT(*) FROM generation_jobs WHERE dry_run = 0 AND created_at >= ?) < ?");
+      values.push(guarded.since, guarded.max);
+    }
+    if (fence) {
+      conditions.push(LEASE_FENCE_SQL);
+      values.push(...leaseFenceParams(fence));
+    }
+    const sql = conditions.length
       ? `INSERT INTO generation_jobs ${columns}
          SELECT ?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?
-         WHERE (SELECT COUNT(*) FROM generation_jobs WHERE dry_run = 0 AND created_at >= ?) < ?`
+         WHERE ${conditions.join(" AND ")}`
       : `INSERT INTO generation_jobs ${columns} VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?)`;
-    if (guarded) values.push(liveBudget.since, liveBudget.max);
     let changes = 0;
     try {
       changes = (await this.db.prepare(sql).bind(...values).run()).changes;
@@ -127,13 +142,15 @@ export class JobsRepo {
       throw err;
     }
     if (changes === 0) {
-      if (!guarded) throw new Error("job insert affected no rows");
+      if (!guarded && !fence) throw new Error("job insert affected no rows");
       // Two identical requests racing for the last slot: the loser's guarded
       // insert sees the budget as full, but the job it wanted already exists.
       // Idempotency wins over the budget error, so both callers get that job.
       const raced = await this.getByIdempotencyKey(input.idempotencyKey);
       if (raced) return { job: raced, created: false };
-      throw new LiveBudgetExceededError(await this.countLiveSince(liveBudget.since), liveBudget.max);
+      if (fence && !(await this.ownsLease(fence.jobId, fence.owner))) throw new LeaseLostError(fence.jobId, fence.owner);
+      if (guarded) throw new LiveBudgetExceededError(await this.countLiveSince(guarded.since), guarded.max);
+      throw new LeaseLostError(fence!.jobId, fence!.owner);
     }
     return { job: (await this.getById(id))!, created: true };
   }
@@ -242,6 +259,24 @@ export class JobsRepo {
       .bind(...params)
       .run();
     if (r.changes !== 1) throw new LeaseLostError(id, owner);
+    return (await this.getById(id))!;
+  }
+
+  /**
+   * Fenced state transition with its activity entry, as one transaction:
+   * both statements carry the lease fence, so either the owner records the
+   * outcome and its log line together, or (lease lost) nothing is written.
+   * The patch may clear the lease; the fence is evaluated before it does.
+   */
+  async transitionOwned(id: string, owner: string, patch: JobPatch, extra: SqlStatement[] = [], onResults?: (changes: number[]) => void): Promise<Job> {
+    const { sets, params } = this.buildPatch(patch);
+    params.push(id, owner);
+    const update = this.db.prepare(`UPDATE generation_jobs SET ${sets.join(", ")} WHERE id = ? AND lease_owner = ? AND status = 'processing'`).bind(...params);
+    const results = await this.db.batch([...extra, update]);
+    const applied = results[results.length - 1]?.changes ?? 0;
+    if (applied !== 1) throw new LeaseLostError(id, owner, "fenced transition matched no row");
+    // Row counts of the extra statements, in order, for callers that care whether a rider matched.
+    onResults?.(results.slice(0, -1).map((r) => r.changes));
     return (await this.getById(id))!;
   }
 

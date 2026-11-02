@@ -1,6 +1,7 @@
-import type { SqlDatabase, SqlValue } from "../db/database";
+import type { SqlDatabase, SqlStatement, SqlValue } from "../db/database";
 import { newId, nowIso, slugify } from "../db/ids";
 import type { Content, ContentCard, ContentRow, ContentSource, ContentStatus } from "../db/types";
+import { LEASE_FENCE_SQL, LeaseLostError, leaseFenceParams, type LeaseFence } from "./lease";
 
 export interface NewContent {
   agentId: string;
@@ -66,58 +67,121 @@ export class ContentRepo {
     return row ? mapContent(row) : null;
   }
 
+  /** Rows that lost their job_id to a canonical row in migration 0002b. */
+  async legacyForJob(jobId: string): Promise<Content[]> {
+    const rows = await this.db.prepare("SELECT * FROM content WHERE legacy_job_id = ? ORDER BY created_at").bind(jobId).all<ContentRow>();
+    return rows.map(mapContent);
+  }
+
+  /**
+   * The job's content row, readable only while `owner` holds the lease.
+   * Null when there is no row yet; LeaseLostError when the lease is gone.
+   */
+  async getByJobIdOwned(fence: LeaseFence): Promise<Content | null> {
+    const row = await this.db
+      .prepare(`SELECT c.* FROM content c WHERE c.job_id = ? AND ${LEASE_FENCE_SQL}`)
+      .bind(fence.jobId, ...leaseFenceParams(fence))
+      .first<ContentRow>();
+    if (row) return mapContent(row);
+    if (!(await this.db.prepare(`SELECT 1 AS ok WHERE ${LEASE_FENCE_SQL}`).bind(...leaseFenceParams(fence)).first())) {
+      throw new LeaseLostError(fence.jobId, fence.owner, "fenced content read refused");
+    }
+    return null;
+  }
+
   /**
    * Inserts content. When `jobId` is set the insert is idempotent per job:
    * if a row for that job already exists (another worker got there first)
    * it is returned instead, guaranteed by the unique index on job_id.
+   * Unfenced: for seeds, tests and operators. Workers use insertForJob.
    */
   async insert(input: NewContent): Promise<Content> {
     if (input.jobId) {
       const existing = await this.getByJobId(input.jobId);
       if (existing) return existing;
     }
+    const written = await this.write(input, null);
+    if (!written) throw new Error("content insert affected no rows");
+    return written.content;
+  }
+
+  /**
+   * Worker-side insert for a job's content. The INSERT carries the lease
+   * fence in the same statement, so a worker that lost the job cannot
+   * persist (let alone publish) a row, however late its provider call
+   * returns. If a previous holder of the lease already produced the row,
+   * that row is adopted (created: false), but only by the current owner.
+   */
+  async insertForJob(input: NewContent & { jobId: string }, fence: LeaseFence): Promise<{ content: Content; created: boolean }> {
+    const existing = await this.getByJobIdOwned(fence);
+    if (existing) return { content: existing, created: false };
+    const written = await this.write(input, fence);
+    if (written) return written;
+    // Zero rows without an error: the fence failed inside the statement.
+    throw new LeaseLostError(fence.jobId, fence.owner, "fenced content insert refused");
+  }
+
+  /**
+   * Statement that publishes a draft, fenced on the job lease, for use in
+   * the completion batch: the row goes public in the same transaction that
+   * completes the job, never before.
+   */
+  publishStatement(contentId: string, nowIsoString: string, fence: LeaseFence): SqlStatement {
+    return this.db
+      .prepare(
+        `UPDATE content SET status = 'published', published_at = COALESCE(published_at, ?), updated_at = ?
+         WHERE id = ? AND status = 'draft' AND ${LEASE_FENCE_SQL}`,
+      )
+      .bind(nowIsoString, nowIsoString, contentId, ...leaseFenceParams(fence));
+  }
+
+  private async write(input: NewContent, fence: LeaseFence | null): Promise<{ content: Content; created: boolean } | null> {
     const id = newId("vid");
     const ts = input.createdAt ?? nowIso();
     const status = input.status ?? "draft";
     const base = slugify(input.title) || id;
+    const columns = `(id, agent_id, category_id, job_id, title, slug, description, tags, duration_seconds,
+               media_key, thumbnail_seed, status, source, views, likes, published_at, created_at, updated_at)`;
     // Concurrent inserts can pick the same free slug; the UNIQUE index catches
     // the losers, which retry with the next free suffix (one winner per round).
     for (let attempt = 0; attempt < 25; attempt++) {
       const slug = await this.uniqueSlug(base);
+      const values: SqlValue[] = [
+        id,
+        input.agentId,
+        input.categoryId,
+        input.jobId ?? null,
+        input.title,
+        slug,
+        input.description,
+        JSON.stringify(input.tags ?? []),
+        input.durationSeconds ?? 0,
+        input.mediaKey ?? null,
+        input.thumbnailSeed ?? id,
+        status,
+        input.source ?? "seed",
+        input.views ?? 0,
+        input.likes ?? 0,
+        input.publishedAt ?? (status === "published" ? ts : null),
+        ts,
+        ts,
+      ];
+      const sql = fence
+        ? `INSERT INTO content ${columns} SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${LEASE_FENCE_SQL}`
+        : `INSERT INTO content ${columns} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      if (fence) values.push(...leaseFenceParams(fence));
       try {
-        await this.db
-          .prepare(
-            `INSERT INTO content (id, agent_id, category_id, job_id, title, slug, description, tags, duration_seconds,
-               media_key, thumbnail_seed, status, source, views, likes, published_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            id,
-            input.agentId,
-            input.categoryId,
-            input.jobId ?? null,
-            input.title,
-            slug,
-            input.description,
-            JSON.stringify(input.tags ?? []),
-            input.durationSeconds ?? 0,
-            input.mediaKey ?? null,
-            input.thumbnailSeed ?? id,
-            status,
-            input.source ?? "seed",
-            input.views ?? 0,
-            input.likes ?? 0,
-            input.publishedAt ?? (status === "published" ? ts : null),
-            ts,
-            ts,
-          )
-          .run();
-        return (await this.getById(id))!;
+        const { changes } = await this.db.prepare(sql).bind(...values).run();
+        if (changes === 0) return null;
+        return { content: (await this.getById(id))!, created: true };
       } catch (err) {
         const text = String(err);
         if (input.jobId && /content\.job_id|uq_content_job/i.test(text)) {
-          const raced = await this.getByJobId(input.jobId);
-          if (raced) return raced;
+          // A row for this job appeared under us. It was written by whoever
+          // held the lease at that moment, so adopt it only if that is still us.
+          const raced = fence ? await this.getByJobIdOwned(fence) : await this.getByJobId(input.jobId);
+          if (raced) return { content: raced, created: false };
+          if (fence) throw new LeaseLostError(fence.jobId, fence.owner, "content row written by another lease holder");
         }
         if (!/UNIQUE.*slug|content\.slug/i.test(text)) throw err;
       }
@@ -237,6 +301,17 @@ export class ContentRepo {
       )
       .bind(mediaKey, durationSeconds ?? null, nowIso(), id)
       .run();
+  }
+
+  /** Fenced attach: only the job's current lease holder may point content at a render. */
+  async attachMediaOwned(id: string, mediaKey: string, durationSeconds: number | undefined, fence: LeaseFence): Promise<void> {
+    const { changes } = await this.db
+      .prepare(
+        `UPDATE content SET media_key = ?, duration_seconds = COALESCE(?, duration_seconds), updated_at = ? WHERE id = ? AND ${LEASE_FENCE_SQL}`,
+      )
+      .bind(mediaKey, durationSeconds ?? null, nowIso(), id, ...leaseFenceParams(fence))
+      .run();
+    if (changes !== 1) throw new LeaseLostError(fence.jobId, fence.owner, "fenced media attach refused");
   }
 
   async setStatus(id: string, status: ContentStatus): Promise<void> {

@@ -1,6 +1,7 @@
-import type { SqlDatabase, SqlValue } from "../db/database";
+import type { SqlDatabase, SqlStatement, SqlValue } from "../db/database";
 import { newId, nowIso } from "../db/ids";
 import type { Activity, ActivityRow } from "../db/types";
+import { LEASE_FENCE_SQL, LeaseLostError, leaseFenceParams, type LeaseFence } from "./lease";
 
 export interface NewActivity {
   type: string;
@@ -42,25 +43,45 @@ export function mapActivity(row: ActivityRow): Activity {
 export class ActivityRepo {
   constructor(private readonly db: SqlDatabase) {}
 
-  async log(input: NewActivity): Promise<Activity> {
+  /**
+   * Builds the insert statement for an entry. With `fence` the insert only
+   * happens while that job lease is held (same statement, atomic), so a
+   * worker that lost its job cannot log outcomes it did not own. Returned
+   * unexecuted so it can also ride inside a `batch`.
+   */
+  statement(input: NewActivity, fence?: LeaseFence): { id: string; statement: SqlStatement } {
     const id = newId("act");
-    await this.db
-      .prepare(
-        `INSERT INTO activity_log (id, agent_id, job_id, content_id, type, message, meta, simulated, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        id,
-        input.agentId ?? null,
-        input.jobId ?? null,
-        input.contentId ?? null,
-        input.type,
-        input.message,
-        JSON.stringify(input.meta ?? {}),
-        input.simulated === false ? 0 : 1,
-        input.createdAt ?? nowIso(),
-      )
-      .run();
+    const values: SqlValue[] = [
+      id,
+      input.agentId ?? null,
+      input.jobId ?? null,
+      input.contentId ?? null,
+      input.type,
+      input.message,
+      JSON.stringify(input.meta ?? {}),
+      input.simulated === false ? 0 : 1,
+      input.createdAt ?? nowIso(),
+    ];
+    const columns = "(id, agent_id, job_id, content_id, type, message, meta, simulated, created_at)";
+    const sql = fence
+      ? `INSERT INTO activity_log ${columns} SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${LEASE_FENCE_SQL}`
+      : `INSERT INTO activity_log ${columns} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    if (fence) values.push(...leaseFenceParams(fence));
+    return { id, statement: this.db.prepare(sql).bind(...values) };
+  }
+
+  async log(input: NewActivity): Promise<Activity> {
+    const { id, statement } = this.statement(input);
+    await statement.run();
+    const row = await this.db.prepare("SELECT * FROM activity_log WHERE id = ?").bind(id).first<ActivityRow>();
+    return mapActivity(row!);
+  }
+
+  /** Fenced log: throws LeaseLostError (and writes nothing) if the lease is no longer held. */
+  async logOwned(input: NewActivity, fence: LeaseFence): Promise<Activity> {
+    const { id, statement } = this.statement(input, fence);
+    const { changes } = await statement.run();
+    if (changes !== 1) throw new LeaseLostError(fence.jobId, fence.owner, "fenced activity write refused");
     const row = await this.db.prepare("SELECT * FROM activity_log WHERE id = ?").bind(id).first<ActivityRow>();
     return mapActivity(row!);
   }

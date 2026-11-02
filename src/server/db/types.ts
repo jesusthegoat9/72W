@@ -45,6 +45,8 @@ export interface ContentRow {
   agent_id: string;
   category_id: string;
   job_id: string | null;
+  /** Set by migration 0002b on rows that used to share a job_id with another row. */
+  legacy_job_id: string | null;
   title: string;
   slug: string;
   description: string;
