@@ -19,6 +19,20 @@ export interface MediaStorage {
   publicUrl(key: string): string | null;
 }
 
+/**
+ * The only media types the site stores and serves. A provider that returns
+ * anything else fails the job instead of parking an unknown blob next to the
+ * published renders, and /api/media never sniffs: unknown types would be sent
+ * as a download, but they are refused before they are stored.
+ */
+export const ALLOWED_MEDIA_TYPES: readonly string[] = ["video/mp4", "video/webm", "image/svg+xml", "image/png", "image/jpeg", "image/webp"];
+
+/** Normalises a content-type header (drops parameters, lower-cases) and checks it against the allow list. */
+export function normalizeMediaType(contentType: string | null | undefined): string | null {
+  const base = (contentType ?? "").split(";")[0].trim().toLowerCase();
+  return ALLOWED_MEDIA_TYPES.includes(base) ? base : null;
+}
+
 export function toBytes(body: Uint8Array | string): Uint8Array {
   return typeof body === "string" ? new TextEncoder().encode(body) : body;
 }

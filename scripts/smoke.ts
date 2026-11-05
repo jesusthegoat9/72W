@@ -7,6 +7,8 @@
  *
  * Only GET requests, and only public routes. It never enqueues jobs, writes
  * to the database or touches media, so it is safe to point at production.
+ * (/random is a redirect and the video page it points at bumps a view count,
+ * the same as any visitor.)
  * Set SMOKE_TIMEOUT_MS to change the per-request timeout (default 15000).
  */
 const base = (process.argv[2] ?? "").replace(/\/+$/, "");
@@ -91,7 +93,12 @@ const CHECKS: Check[] = [
     contains: ['"ok":true'],
     capture: (body) => captureMatch("backend", /"backend":"([a-z]+)"/, body),
   },
-  { path: "/", contains: ["x86xx", "/explore", "/agents"], excludes: ["Application error"] },
+  {
+    path: "/",
+    contains: ["x86xx", "/explore", "/agents", "Shift log", "/random"],
+    excludes: ["Application error", "Sign up", "Log in"],
+    headers: { "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "strict-origin" },
+  },
   { path: "/explore", contains: ["Explore", "/video/"], excludes: ["Application error"] },
   { path: "/explore?q=rack", contains: ["Results for"], excludes: ["Application error"] },
   { path: "/explore?q=a&q=b&sort=newest&category=hot-racks", excludes: ["Application error"] },
@@ -113,7 +120,14 @@ const CHECKS: Check[] = [
   { path: "/robots.txt", contains: ["Sitemap"] },
   { path: "/sitemap.xml", contains: ["<urlset"], headers: { "content-type": "xml" } },
   { path: "/dashboard", status: 307, headers: { location: "/login" } },
-  { path: "/login", contains: ["Log in"] },
+  { path: "/login", contains: ["Operator login"], excludes: ["Sign up"] },
+  { path: "/signup", status: 404 },
+  { path: "/for-agents", contains: ["/api/agents", "simulated"], excludes: ["Application error"] },
+  { path: "/llms.txt", contains: ["# x86xx", "/api/agents"], headers: { "content-type": "text/plain" } },
+  { path: "/api/agents", contains: ['"handle":"rackdaddy"'], excludes: ["system_prompt", "You are RackDaddy"] },
+  { path: "/api/agents/rackdaddy", contains: ['"uploads"', '"activity"'], excludes: ["system_prompt", "You are RackDaddy"] },
+  { path: "/api/agents/nobody", status: 404 },
+  { path: "/random", status: 307, headers: { location: "/video/" } },
   // 401 when JOBS_API_TOKEN is configured, 503 when the endpoint is disabled; never 200.
   { path: "/api/jobs", status: [401, 503] },
   { path: "/api/jobs/run", status: 405 },

@@ -25,6 +25,10 @@ export interface AppConfig {
   leaseSeconds: number;
   /** Token required for the write endpoints under /api/jobs. Unset = endpoints disabled. */
   jobsApiToken: string | null;
+  /** Secret that signs the operator session cookie. Unset = no session can be issued or verified. */
+  sessionSecret: string | null;
+  /** Password for the single operator login (/login → /dashboard). Unset = login disabled. */
+  operatorPassword: string | null;
   openrouter: {
     apiKey: string | null;
     model: string;
@@ -68,6 +72,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // 1s .. 24h: timers above 2^31-1 ms are clamped to 1 ms by Node, which would make every renewal time out.
     leaseSeconds: Math.min(Math.max(1, num(env.GENERATION_LEASE_SECONDS, 60)), 24 * 3600),
     jobsApiToken: env.JOBS_API_TOKEN || null,
+    sessionSecret: env.SESSION_SECRET || null,
+    operatorPassword: env.OPERATOR_PASSWORD || null,
     openrouter: {
       apiKey: env.OPENROUTER_API_KEY || null,
       model: env.OPENROUTER_MODEL ?? "qwen/qwen3.7-flash",

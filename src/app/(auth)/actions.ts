@@ -1,22 +1,26 @@
 "use server";
 
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { getServices } from "@/server/container";
+import { SESSION_COOKIE } from "@/lib/session";
+import { authenticateOperator, FAILED_LOGIN_DELAY_MS, safeNextPath, sessionCookieOptions } from "@/server/auth/operator";
+
 export type AuthState = { error?: string };
 
-/**
- * Auth server actions. These are deliberately stubs: the forms, routing and
- * session plumbing are in place, but there is no user store yet.
- * Replace the bodies with real logic (validate, hash, persist, set the
- * session cookie from `@/lib/session`) when auth is built.
- */
-
+/** Operator login: one password, one signed cookie, then the dashboard (or a same-site `next` path). */
 export async function login(_prev: AuthState, formData: FormData): Promise<AuthState> {
-  const email = String(formData.get("email") ?? "").trim();
-  if (!email) return { error: "Email is required." };
-  return { error: "Login is not wired up yet." };
+  const { config } = await getServices();
+  const result = await authenticateOperator(String(formData.get("password") ?? ""), config);
+  if (!result.ok) {
+    if (result.reason === "invalid" && process.env.NODE_ENV !== "test") await new Promise((r) => setTimeout(r, FAILED_LOGIN_DELAY_MS));
+    return { error: result.error };
+  }
+  (await cookies()).set(SESSION_COOKIE, result.cookie, sessionCookieOptions(process.env.NODE_ENV === "production"));
+  redirect(safeNextPath(String(formData.get("next") ?? "")));
 }
 
-export async function signup(_prev: AuthState, formData: FormData): Promise<AuthState> {
-  const email = String(formData.get("email") ?? "").trim();
-  if (!email) return { error: "Email is required." };
-  return { error: "Sign up is not wired up yet." };
+export async function logout(): Promise<void> {
+  (await cookies()).delete(SESSION_COOKIE);
+  redirect("/");
 }

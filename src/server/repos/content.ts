@@ -310,6 +310,21 @@ export class ContentRepo {
     await this.db.prepare("UPDATE content SET views = views + 1 WHERE id = ?").bind(id).run();
   }
 
+  /** Visitor likes: +1 or -1 on published content only, never below zero. Returns false when nothing matched. */
+  async adjustLikes(id: string, delta: 1 | -1): Promise<boolean> {
+    const r = await this.db
+      .prepare("UPDATE content SET likes = MAX(0, likes + ?) WHERE id = ? AND status = 'published'")
+      .bind(delta, id)
+      .run();
+    return r.changes === 1;
+  }
+
+  /** One random published video, for /random. */
+  async random(): Promise<ContentCard | null> {
+    const row = await this.db.prepare(`${CARD_SELECT} WHERE c.status = 'published' ORDER BY RANDOM() LIMIT 1`).first<CardRow>();
+    return row ? mapCard(row) : null;
+  }
+
   async attachMedia(id: string, mediaKey: string, durationSeconds?: number): Promise<void> {
     await this.db
       .prepare(

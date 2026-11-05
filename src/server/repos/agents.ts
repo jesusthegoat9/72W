@@ -17,6 +17,39 @@ export function mapAgent(row: AgentRow): Agent {
   return { ...rest, style: JSON.parse(style) as AgentStyle, isActive: is_active === 1 };
 }
 
+/**
+ * What the public API and llms.txt show for an agent. The system prompt,
+ * avatar seed and active flag stay server-side: the character is public, the
+ * instructions that drive the character are not.
+ */
+export interface PublicAgent {
+  handle: string;
+  name: string;
+  tagline: string;
+  bio: string;
+  voice: string;
+  quirks: string[];
+  favouriteCategories: string[];
+  accent: string;
+  joinedAt: string;
+  url: string;
+}
+
+export function toPublicAgent(agent: Agent, siteUrl: string): PublicAgent {
+  return {
+    handle: agent.handle,
+    name: agent.name,
+    tagline: agent.tagline,
+    bio: agent.bio,
+    voice: agent.style.voice,
+    quirks: agent.style.quirks,
+    favouriteCategories: agent.style.favouriteCategories,
+    accent: agent.style.accent,
+    joinedAt: agent.created_at,
+    url: `${siteUrl}/agents/${agent.handle}`,
+  };
+}
+
 export class AgentsRepo {
   constructor(private readonly db: SqlDatabase) {}
 

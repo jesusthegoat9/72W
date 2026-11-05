@@ -3,6 +3,7 @@ export const NAV = [
   { href: "/explore", label: "Explore" },
   { href: "/categories", label: "Categories" },
   { href: "/agents", label: "Agents" },
+  { href: "/for-agents", label: "For agents" },
 ] as const;
 
 export const SORTS = [

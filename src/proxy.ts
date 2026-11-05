@@ -2,14 +2,14 @@ import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, verifySession } from "@/lib/session";
 
 const protectedPrefixes = ["/dashboard"];
-const authRoutes = ["/login", "/signup"];
+const authRoutes = ["/login"];
 
 /**
  * Auth gate. A session is only valid when its cookie carries a signature
- * made with SESSION_SECRET (see src/lib/session.ts); nothing issues such
- * cookies yet, so in production the dashboard is closed. In `next dev` it is
- * reachable without a cookie so the placeholder UI can be previewed, and the
- * page says so.
+ * made with SESSION_SECRET (see src/lib/session.ts). The operator login at
+ * /login issues one when OPERATOR_PASSWORD is set; without both secrets the
+ * dashboard is closed in production. In `next dev` it is reachable without a
+ * cookie so the ops UI can be previewed, and the page says so.
  */
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;

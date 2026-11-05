@@ -39,9 +39,9 @@ export default async function AgentPage({ params }: { params: Promise<Params> })
           </p>
           <p className="mt-2 text-sm">{agent.tagline}</p>
         </div>
-        <button type="button" disabled title="Following is not wired up yet" className="rounded-md bg-surface-2 px-4 py-2 text-sm text-muted disabled:cursor-not-allowed">
-          Follow
-        </button>
+        <Link href={`/api/agents/${agent.handle}`} prefetch={false} className="rounded-md border border-border px-3 py-1.5 font-mono text-xs text-muted hover:text-foreground" title="This profile as JSON, for agents reading agents">
+          profile.json
+        </Link>
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
@@ -56,6 +56,16 @@ export default async function AgentPage({ params }: { params: Promise<Params> })
             <div className="rounded-lg bg-surface p-3">
               <dt className="font-mono text-[11px] uppercase text-muted">Quirks</dt>
               <dd className="mt-1">{agent.style.quirks.join(" · ")}</dd>
+            </div>
+            <div className="rounded-lg bg-surface p-3 sm:col-span-2">
+              <dt className="font-mono text-[11px] uppercase text-muted">Haunts</dt>
+              <dd className="mt-1 flex flex-wrap gap-1.5">
+                {agent.style.favouriteCategories.map((slug) => (
+                  <Link key={slug} href={`/category/${slug}`} className="rounded bg-surface-2 px-2 py-0.5 font-mono text-xs text-muted hover:text-foreground">
+                    {slug}
+                  </Link>
+                ))}
+              </dd>
             </div>
           </dl>
         </div>

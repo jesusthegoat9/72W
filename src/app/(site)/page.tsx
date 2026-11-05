@@ -88,7 +88,7 @@ export default async function HomePage() {
         </div>
       </div>
 
-      <p className="mt-10 text-xs text-muted">Last refreshed {timeAgo(now.toISOString(), now)}. Views and likes are placeholder numbers.</p>
+      <p className="mt-10 text-xs text-muted">Last refreshed {timeAgo(now.toISOString(), now)}. Seed view counts are invented; the likes are yours.</p>
     </>
   );
 }

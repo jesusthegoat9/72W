@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { cookies } from "next/headers";
 import { getServices } from "@/server/container";
-import { SESSION_COOKIE, verifySession } from "@/lib/session";
+import { currentOperator } from "@/lib/operator";
+import { logout } from "@/app/(auth)/actions";
+import { EnqueueForm, RunDispatcherForm } from "@/components/ops-forms";
 import { Avatar } from "@/components/avatar";
 import { Badge } from "@/components/ui/section";
 import { timeAgo } from "@/lib/format";
@@ -15,9 +16,10 @@ const statusTone: Record<JobStatus, "muted" | "ok" | "warn" | "danger"> = { queu
 export default async function DashboardPage() {
   const { repos, config } = await getServices();
   const now = new Date();
-  const hasSession = Boolean(await verifySession((await cookies()).get(SESSION_COOKIE)?.value, process.env.SESSION_SECRET));
-  const [agents, published, drafts, jobCounts, jobs, activity, generated] = await Promise.all([
+  const hasSession = Boolean(await currentOperator());
+  const [agents, categories, published, drafts, jobCounts, jobs, activity, generated] = await Promise.all([
     repos.agents.list(),
+    repos.categories.list(),
     repos.content.count("published"),
     repos.content.count("draft"),
     repos.jobs.counts(),
@@ -32,7 +34,7 @@ export default async function DashboardPage() {
     <>
       {!hasSession ? (
         <div className="mb-6 rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
-          <strong className="font-medium">Development preview.</strong> There is no login yet. This page is only reachable without a session in{" "}
+          <strong className="font-medium">Development preview.</strong> No operator session. This page is only reachable without one in{" "}
           <code className="font-mono">next dev</code>; production redirects to <code className="font-mono">/login</code>.
         </div>
       ) : null}
@@ -40,13 +42,33 @@ export default async function DashboardPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Agent operations</h1>
-          <p className="mt-1 text-sm text-muted">Read-only view of jobs, activity and generated content. Jobs are run from the CLI (<code className="font-mono">npm run jobs:run</code>).</p>
+          <p className="mt-1 text-sm text-muted">Jobs, activity and generated content. Everything queued here is a dry run against the mock providers.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge tone={config.liveGenerationEnabled ? "danger" : "ok"}>live generation {config.liveGenerationEnabled ? "ENABLED" : "off"}</Badge>
           <Badge tone="muted">dry run default {config.dryRunDefault ? "on" : "off"}</Badge>
+          {hasSession ? (
+            <form action={logout}>
+              <button type="submit" className="rounded-md border border-border px-2.5 py-1 text-xs text-muted hover:text-foreground">
+                Log out
+              </button>
+            </form>
+          ) : null}
         </div>
       </div>
+
+      <section className="mt-6 grid gap-4 rounded-lg border border-border bg-card p-4 lg:grid-cols-2">
+        <div>
+          <h2 className="text-sm font-semibold">Queue a dry-run job</h2>
+          <p className="mt-1 mb-3 text-xs text-muted">Creates a text listing in the agent&apos;s voice, optionally chained to a mock render. No provider is called.</p>
+          <EnqueueForm agents={agents.map((a) => ({ handle: a.handle, name: a.name }))} categories={categories.map((c) => ({ slug: c.slug, name: c.name }))} />
+        </div>
+        <div>
+          <h2 className="text-sm font-semibold">Dispatcher</h2>
+          <p className="mt-1 mb-3 text-xs text-muted">Runs one pass: claims up to {config.maxJobsPerRun} queued jobs, polls in-flight renders, publishes finished dry runs.</p>
+          <RunDispatcherForm />
+        </div>
+      </section>
 
       <dl className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {[
@@ -64,8 +86,8 @@ export default async function DashboardPage() {
         ))}
       </dl>
 
-      <div className="mt-8 grid gap-8 lg:grid-cols-3">
-        <section className="lg:col-span-2">
+      <div className="mt-8 grid min-w-0 gap-8 lg:grid-cols-3">
+        <section className="min-w-0 lg:col-span-2">
           <h2 className="text-sm font-semibold text-muted">Recent jobs</h2>
           <div className="mt-2 overflow-x-auto rounded-lg border border-border">
             <table className="w-full text-left text-sm">
@@ -83,7 +105,7 @@ export default async function DashboardPage() {
               <tbody>
                 {jobs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-3 py-8 text-center text-muted">No jobs yet. Run <code className="font-mono">npm run jobs:enqueue -- rackdaddy</code>.</td>
+                    <td colSpan={7} className="px-3 py-8 text-center text-muted">No jobs yet. Queue one above.</td>
                   </tr>
                 ) : null}
                 {jobs.map((j) => (
@@ -111,7 +133,7 @@ export default async function DashboardPage() {
               <li key={c.id} className="flex items-center gap-3 px-3 py-2 text-sm">
                 <Avatar name={c.agent_name} accent={c.agent_accent} size={24} />
                 <div className="min-w-0 flex-1">
-                  <Link href={`/video/${c.slug}`} className="truncate hover:text-accent">{c.title}</Link>
+                  <Link href={`/video/${c.slug}`} className="block truncate hover:text-accent">{c.title}</Link>
                   <p className="truncate text-xs text-muted">{c.agent_name} · {c.category_name} · {c.media_key ? `media: ${c.media_key}` : "no media"}</p>
                 </div>
                 <Badge tone={c.status === "published" ? "ok" : "muted"}>{c.status}</Badge>

@@ -2,7 +2,10 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getServices } from "@/server/container";
-import { PlayerPlaceholder } from "@/components/player";
+import { cookies } from "next/headers";
+import { Player } from "@/components/player";
+import { LikeButton } from "@/components/like-button";
+import { LIKES_COOKIE, parseLikes } from "@/server/likes";
 import { Avatar } from "@/components/avatar";
 import { VideoCard } from "@/components/video-card";
 import { Badge } from "@/components/ui/section";
@@ -25,13 +28,14 @@ export default async function VideoPage({ params }: { params: Promise<Params> })
   const now = new Date();
   const [related, agent] = await Promise.all([repos.content.related(video, 8), repos.agents.getById(video.agent_id)]);
   const mediaUrl = video.media_key ? media.publicUrl(video.media_key) : null;
+  const liked = parseLikes((await cookies()).get(LIKES_COOKIE)?.value).includes(video.id);
   // Fire-and-forget view count. Placeholder analytics, not real.
   void repos.content.incrementViews(video.id).catch(() => {});
 
   return (
     <div className="grid gap-8 lg:grid-cols-3">
       <div className="lg:col-span-2">
-        <PlayerPlaceholder video={video} mediaUrl={mediaUrl} />
+        <Player video={video} mediaUrl={mediaUrl} />
         <h1 className="mt-4 text-xl font-semibold tracking-tight sm:text-2xl">{video.title}</h1>
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted">
           <span>{formatViews(video.views)} views</span>
@@ -53,12 +57,7 @@ export default async function VideoPage({ params }: { params: Promise<Params> })
             </div>
           </Link>
           <div className="flex shrink-0 gap-2">
-            <button type="button" disabled title="Reactions are not wired up yet" className="rounded-full border border-border px-3 py-1.5 text-sm text-muted disabled:cursor-not-allowed">
-              ▲ {formatViews(video.likes)}
-            </button>
-            <button type="button" disabled title="Following is not wired up yet" className="rounded-full bg-surface-2 px-3 py-1.5 text-sm text-muted disabled:cursor-not-allowed">
-              Follow
-            </button>
+            <LikeButton contentId={video.id} likes={video.likes} liked={liked} />
           </div>
         </div>
 

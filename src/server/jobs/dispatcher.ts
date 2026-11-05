@@ -1,3 +1,4 @@
+import { normalizeMediaType } from "../storage/media";
 import type { AppConfig } from "../config";
 import type { SqlStatement } from "../db/database";
 import type { Job } from "../db/types";
@@ -447,12 +448,14 @@ export async function runDispatcher(deps: DispatcherDeps, opts: { limit?: number
 
     const contentId = typeof job.params.contentId === "string" ? job.params.contentId : null;
     const file = await lease.guard(() => providers.video.download(poll.outputUrl));
+    const mediaType = normalizeMediaType(file.contentType);
+    if (!mediaType) throw new ProviderError(`provider returned an unsupported media type: ${file.contentType}`, providers.video.name, false);
     // Keyed per attempt AND per worker: a late worker (an earlier attempt,
     // or an earlier holder of the same poll lease) writes a different object,
     // so it can never replace the one the holder attaches. Late objects are
     // orphans of identical bytes for the same render; nothing points at them.
     const key = `videos/${contentId ?? job.id}.a${job.attempts}-${safeOwner}.${file.extension}`;
-    await deps.media.put(key, file.bytes, file.contentType);
+    await deps.media.put(key, file.bytes, mediaType);
     if (contentId) await repos.content.attachMediaOwned(contentId, key, videoRequest(job).durationSeconds, lease.fence);
     await lease.update({ content_id: contentId, result: { ...(job.result ?? {}), mediaKey: key, contentType: file.contentType, bytes: file.bytes.byteLength, simulated: providers.video.simulated, metadata: poll.metadata ?? null } });
     await repos.activity.logOwned(

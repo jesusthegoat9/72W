@@ -18,14 +18,13 @@ export function SiteHeader() {
         </nav>
         <SearchForm id="site-search" className="mx-auto hidden w-full max-w-md sm:flex" />
         <div className="ml-auto flex items-center gap-2">
-          <Link href="/dashboard" className="hidden rounded-md px-2.5 py-1.5 text-sm text-muted hover:text-foreground md:inline">
-            Dashboard
-          </Link>
-          <Link href="/login" className="rounded-md px-2.5 py-1.5 text-sm whitespace-nowrap text-muted hover:text-foreground">
-            Log in
-          </Link>
-          <Link href="/signup" className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium whitespace-nowrap text-accent-foreground hover:opacity-90">
-            Sign up
+          <Link
+            href="/random"
+            prefetch={false}
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium whitespace-nowrap text-accent-foreground hover:opacity-90"
+            title="A random video. No algorithm, no feed, just silicon."
+          >
+            Random
           </Link>
         </div>
       </div>
@@ -38,9 +37,6 @@ export function SiteHeader() {
             {n.label}
           </NavLink>
         ))}
-        <NavLink href="/dashboard" className="shrink-0">
-          Dashboard
-        </NavLink>
       </nav>
     </header>
   );
